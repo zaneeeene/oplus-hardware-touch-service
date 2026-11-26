@@ -93,8 +93,8 @@ x86_64 clang driver cannot execute on that host.
 ## Build
 
 ```bash
-cd /home/Gold/oplus-hardware-touch-service
-export ANDROID_NDK_HOME=/home/Gold/android-ndk-r26d
+cd oplus-hardware-touch-service
+export ANDROID_NDK_HOME=/path/to/android-ndk-r26d
 ./build.sh
 ```
 
@@ -169,8 +169,8 @@ device labels for those nodes; do not relabel shared devices.
 
 ## SELinux integration
 
-The repository keeps policy sources under `sepolicy/`; the ZIP contains three
-files under `integration/sepolicy/`:
+The repository keeps policy sources under `sepolicy/`. They are intentionally
+kept separate from the install-only vendor ZIP:
 
 ```text
 oplus-hardware-touch-service.te
