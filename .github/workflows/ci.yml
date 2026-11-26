@@ -22,7 +22,9 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run tests
-        run: cargo test --locked --all-targets
+        run: |
+          cargo test --locked --all-targets
+          cargo test --locked --all-targets --features gesture-backlight
 
       - name: Validate shell scripts
         run: |
@@ -32,6 +34,10 @@ jobs:
 
   android-build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        gesture-variant: [stable, backlight]
     steps:
       - uses: actions/checkout@v4
 
@@ -49,4 +55,4 @@ jobs:
       - name: Build AArch64 vendor package
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: ./build.sh
+        run: ./build.sh --gesture-variant "${{ matrix.gesture-variant }}"

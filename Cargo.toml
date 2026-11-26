@@ -50,3 +50,4 @@ strip = false
 [features]
 default = ["vendor"]
 vendor = []
+gesture-backlight = []

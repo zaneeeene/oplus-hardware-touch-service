@@ -22,6 +22,10 @@ only as an ABI reference; no other device kernel tree is touched.
   the working raise-to-wake injection instead of relying on a raw
   `KEY_WAKEUP`. The request is checked after 250 ms and retried once if the
   panel is still off/dozing; uinput remains a command-failure fallback.
+- Provides a selectable `backlight` gesture backend for panels that need FTS
+  touchscreen discovery, a direct `panel0-backlight` screen-off check, and the
+  `/system/bin/input keyevent 134` AOD-preview path. The default `stable`
+  backend is unchanged.
 - Suppresses the DT2S immediate-rewake race: a tap sequence that starts while
   the display is awake cannot inject a wake key after the framework turns the
   display off.
@@ -57,6 +61,15 @@ build/out/oplus-hardware-touch-service-vendor.zip
 build/out/oplus-hardware-touch-service-SHA256SUMS
 ```
 
+The optional backlight gesture backend is written to a separate directory so
+it cannot overwrite the default build:
+
+```text
+build/out/backlight-gesture/vendor.oplus.hardware.touch-V2-service
+build/out/backlight-gesture/oplus-hardware-touch-service-backlight-gesture-vendor.zip
+build/out/backlight-gesture/oplus-hardware-touch-service-backlight-gesture-SHA256SUMS
+```
+
 Inside the release ZIP, files are arranged as:
 
 ```text
@@ -84,6 +97,22 @@ cd /home/Gold/oplus-hardware-touch-service
 export ANDROID_NDK_HOME=/home/Gold/android-ndk-r26d
 ./build.sh
 ```
+
+Build the optional backlight gesture backend instead:
+
+```bash
+./build.sh --gesture-variant backlight
+```
+
+The equivalent environment form is:
+
+```bash
+GESTURE_VARIANT=backlight ./build.sh
+```
+
+`./build.sh --help` lists both variants. The choice maps to the
+`gesture-backlight` Cargo feature, which changes only the touchscreen name
+list, screen-off fallback, and AOD-preview command path.
 
 The script checks formatting, runs all tests, cross-builds the Android target,
 verifies the ELF interpreter and page alignment, packages the HAL binary,
@@ -368,12 +397,35 @@ Hardware verdicts still require the target device. In particular, verify:
 5. single-tap preview works while the screen is off;
 6. pickup wake works with the secure setting enabled.
 
-## References
+## Sources and acknowledgements
 
-- MiOplusFingerprint-rs commits `fa36acc` and `6d15f27`
-- Xia-s-Projekt `oplus-touch-hal`
-- nischay12089 `oplus-sensor-bridge`
-- MiCode `Xiaomi_Kernel_OpenSource` branch `topaz-t-oss`
+This project was developed using the following public references and
+device-behavior observations:
+
+- [hoshikv/MiOplusFingerprint-rs commit `fa36acc`](https://github.com/hoshikv/MiOplusFingerprint-rs/commit/fa36acc074b1f29df5d2a6d3aa9cb7d031ffde3a)
+  and [commit `6d15f27`](https://github.com/hoshikv/MiOplusFingerprint-rs/commit/6d15f27cb0a43f635c9f392b093fd53911d2a343)
+  for AOD, gesture, and wake behavior references.
+- [Xia-s-Projekt/oplus-touch-hal](https://github.com/Xia-s-Projekt/oplus-touch-hal)
+  for OPlus touch-service structure, AIDL behavior, and gesture-watcher design
+  references.
+- [nischay12089/oplus-sensor-bridge](https://github.com/nischay12089/oplus-sensor-bridge)
+  for sensor bridge, screen transition, flicker, and one-tap-preview behavior
+  references.
+- [MiCode/Xiaomi_Kernel_OpenSource branch `topaz-t-oss`](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/tree/topaz-t-oss)
+  for read-only topaz kernel ABI references covering `xiaomi-touch`,
+  `mi_display`, touch input, and gesture interfaces.
+- [oppo-source/android_kernel_oppo_sm6225](https://github.com/oppo-source/android_kernel_oppo_sm6225)
+  for read-only SM6225-compatible touch and display interface references.
+- [kquieter-debug/dt2w_rust](https://github.com/kquieter-debug/dt2w_rust)
+  for investigating dynamic DT2W Settings/XML behavior. The live Settings
+  selector was later removed from this implementation.
+- The locally supplied `oplus-hardware-raise2wake` binary was used as a
+  behavioral reference for pickup-sensor selection and Android power-wake
+  injection. It is not redistributed in this repository.
+
+No source or configuration from the Xiaomi MT6833 kernel tree or other
+unrelated device kernels was used or modified. Kernel trees were consulted
+only for the SM6225/topaz interfaces relevant to this userspace service.
 
 ## License
 

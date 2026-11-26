@@ -35,6 +35,18 @@ const KEY_GOTO: c_ushort = 0x0162;
 const TAP_WINDOW_MS: u64 = 350;
 const PREVIEW_DEBOUNCE_MS: u64 = 500;
 
+#[cfg(feature = "gesture-backlight")]
+const TOUCHSCREEN_NAMES: &[&str] = &[
+    "touchscreen",
+    "touch screen",
+    "nt36",
+    "focaltech",
+    "goodix",
+    "fts",
+];
+#[cfg(not(feature = "gesture-backlight"))]
+const TOUCHSCREEN_NAMES: &[&str] = &["touchscreen", "touch screen", "nt36", "focaltech", "goodix"];
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GestureType {
@@ -182,11 +194,8 @@ impl GestureHandler {
         dt2w_allowed: Arc<AtomicBool>,
     ) -> TouchResult<Self> {
         let configured = std::path::Path::new(touchscreen_path);
-        let discovered = configured_or_discover(
-            configured,
-            &["touchscreen", "touch screen", "nt36", "focaltech", "goodix"],
-        )
-        .or_else(crate::evdev::find_touchscreen);
+        let discovered = configured_or_discover(configured, TOUCHSCREEN_NAMES)
+            .or_else(crate::evdev::find_touchscreen);
 
         let touchscreen = discovered.and_then(|path| {
             match open(
@@ -395,7 +404,7 @@ impl GestureHandler {
                         state.x, state.y
                     );
                     if now.saturating_sub(state.last_preview_ms) >= PREVIEW_DEBOUNCE_MS
-                        && screen.is_screen_off_or_doze()
+                        && screen_is_off_or_doze(screen)
                     {
                         state.sequence_id = state.sequence_id.wrapping_add(1);
                         state.tap_count = 0;
@@ -405,7 +414,7 @@ impl GestureHandler {
                     }
                 }
                 (EV_KEY, KEY_WAKEUP | KEY_POWER | KEY_F4) if event.value == 1 => {
-                    if ScreenState::read().is_screen_off_or_doze() {
+                    if screen_is_off_or_doze(ScreenState::read()) {
                         kernel_reported_wake = true;
                         outcome = Some(TapOutcome::Double {
                             x: state.x,
@@ -444,9 +453,9 @@ impl GestureHandler {
         let screen_off = match ScreenState::read() {
             ScreenState::Unknown => {
                 debug!("Screen state unavailable; suppressing userspace tap actions");
-                false
+                screen_is_off_or_doze(ScreenState::Unknown)
             }
-            state => state.is_screen_off_or_doze(),
+            state => screen_is_off_or_doze(state),
         };
         state.note_down(now_ms(), screen_off);
     }
@@ -485,7 +494,7 @@ impl GestureHandler {
             return Ok(());
         }
 
-        if !state.sequence_screen_off || ScreenState::read().is_on() {
+        if !state.sequence_screen_off || screen_is_awake(ScreenState::read()) {
             return Ok(());
         }
 
@@ -505,7 +514,7 @@ impl GestureHandler {
         }
 
         if gesture_type == GestureType::SingleTap && action == "aod_preview" && !wake_screen {
-            if !ScreenState::read().is_screen_off_or_doze() {
+            if !screen_is_off_or_doze(ScreenState::read()) {
                 debug!("AOD preview suppressed because the display is awake");
                 return Ok(());
             }
@@ -534,8 +543,7 @@ impl GestureHandler {
         // logs while doing nothing on screen.
         hold_wake_lock("oplus_hardware_touch_service_preview 1500000000");
         let command_result = tokio::task::spawn_blocking(|| {
-            Command::new("/system/bin/cmd")
-                .args(["input", "keyevent", "134"])
+            aod_preview_command()
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -576,7 +584,7 @@ impl GestureHandler {
         let handler = self.clone();
         tokio::spawn(async move {
             for attempt in 1..=2 {
-                if !ScreenState::read().is_screen_off_or_doze() {
+                if !screen_is_off_or_doze(ScreenState::read()) {
                     debug!("Wake gesture {gesture_type:?}: display became awake before attempt {attempt}");
                     break;
                 }
@@ -601,7 +609,7 @@ impl GestureHandler {
 
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 let state = ScreenState::read();
-                if !state.is_screen_off_or_doze() {
+                if !screen_is_off_or_doze(state) {
                     info!("DT2W wake confirmed after attempt {attempt} (state={state:?})");
                     break;
                 }
@@ -696,6 +704,50 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+#[cfg(feature = "gesture-backlight")]
+fn panel_backlight_is_zero() -> bool {
+    std::fs::read_to_string("/sys/class/backlight/panel0-backlight/brightness")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .is_some_and(|brightness| brightness == 0)
+}
+
+#[cfg(feature = "gesture-backlight")]
+fn screen_is_off_or_doze(state: ScreenState) -> bool {
+    state.is_screen_off_or_doze() || panel_backlight_is_zero()
+}
+
+#[cfg(not(feature = "gesture-backlight"))]
+fn screen_is_off_or_doze(state: ScreenState) -> bool {
+    state.is_screen_off_or_doze()
+}
+
+#[cfg(feature = "gesture-backlight")]
+fn screen_is_awake(state: ScreenState) -> bool {
+    state.is_on() && !panel_backlight_is_zero()
+}
+
+#[cfg(not(feature = "gesture-backlight"))]
+fn screen_is_awake(state: ScreenState) -> bool {
+    state.is_on()
+}
+
+fn aod_preview_command() -> Command {
+    #[cfg(feature = "gesture-backlight")]
+    {
+        let mut command = Command::new("/system/bin/input");
+        command.args(["keyevent", "134"]);
+        command
+    }
+
+    #[cfg(not(feature = "gesture-backlight"))]
+    {
+        let mut command = Command::new("/system/bin/cmd");
+        command.args(["input", "keyevent", "134"]);
+        command
+    }
+}
+
 fn hold_wake_lock(request: &str) {
     // A timed wake lock keeps the AP out of suspend until InputManager has
     // consumed the key. It does not light the panel.
@@ -770,5 +822,14 @@ mod tests {
         assert_ne!(state.sequence_id, sequence_id);
         assert!(!state.second_tap_started);
         assert_eq!(state.tap_count, 0);
+    }
+
+    #[test]
+    fn selected_gesture_backend_uses_expected_touchscreen_names() {
+        assert!(TOUCHSCREEN_NAMES.contains(&"goodix"));
+        assert_eq!(
+            TOUCHSCREEN_NAMES.contains(&"fts"),
+            cfg!(feature = "gesture-backlight")
+        );
     }
 }

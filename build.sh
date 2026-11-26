@@ -8,11 +8,72 @@ TARGET="aarch64-linux-android"
 API="${ANDROID_API_LEVEL:-30}"
 PROJECT_NAME="oplus-hardware-touch-service"
 HAL_NAME="vendor.oplus.hardware.touch-V2-service"
+GESTURE_VARIANT="${GESTURE_VARIANT:-stable}"
+
+usage() {
+    cat <<'EOF'
+Usage: ./build.sh [--gesture-variant stable|backlight]
+
+Gesture backends:
+  stable     Default touchscreen discovery and AOD preview path.
+  backlight  Shipped root-gesture variant: adds FTS discovery, panel0
+             backlight screen-off fallback, and direct input key injection.
+
+The GESTURE_VARIANT environment variable is also supported.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --gesture-variant)
+            if [[ $# -lt 2 ]]; then
+                echo "--gesture-variant requires a value" >&2
+                usage >&2
+                exit 2
+            fi
+            GESTURE_VARIANT="$2"
+            shift 2
+            ;;
+        --gesture-variant=*)
+            GESTURE_VARIANT="${1#*=}"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$GESTURE_VARIANT" in
+    stable)
+        FEATURE_ARGS=()
+        ARTIFACT_SUFFIX=""
+        OUTPUT_SUBDIR=""
+        ;;
+    backlight)
+        FEATURE_ARGS=(--features gesture-backlight)
+        ARTIFACT_SUFFIX="-backlight-gesture"
+        OUTPUT_SUBDIR="/backlight-gesture"
+        ;;
+    *)
+        echo "Unsupported gesture variant: $GESTURE_VARIANT" >&2
+        usage >&2
+        exit 2
+        ;;
+esac
+
 BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
-OUT_DIR="${OUT_DIR:-${DIST_DIR:-$BUILD_DIR/out}}"
-ZIP_OUT="${ZIP_OUT:-$OUT_DIR/$PROJECT_NAME-vendor.zip}"
+DEFAULT_OUT_DIR="${BUILD_DIR}/out${OUTPUT_SUBDIR}"
+OUT_DIR="${OUT_DIR:-${DIST_DIR:-$DEFAULT_OUT_DIR}}"
+ZIP_OUT="${ZIP_OUT:-$OUT_DIR/$PROJECT_NAME$ARTIFACT_SUFFIX-vendor.zip}"
 BIN_OUT="${BIN_OUT:-$OUT_DIR/$HAL_NAME}"
-SUMS_OUT="${SUMS_OUT:-$OUT_DIR/$PROJECT_NAME-SHA256SUMS}"
+SUMS_OUT="${SUMS_OUT:-$OUT_DIR/$PROJECT_NAME$ARTIFACT_SUFFIX-SHA256SUMS}"
 INIT_RC="$ROOT/etc/init/$HAL_NAME.rc"
 
 STAGE=""
@@ -53,12 +114,12 @@ fi
 
 cd "$ROOT"
 
-echo "==> Checking formatting and tests"
+echo "==> Checking formatting and tests (gesture variant: $GESTURE_VARIANT)"
 cargo fmt --all -- --check
-cargo test --locked --all-targets
+cargo test --locked --all-targets "${FEATURE_ARGS[@]}"
 
-echo "==> Building $TARGET (API $API)"
-cargo build --locked --release --target "$TARGET" --bin "$PROJECT_NAME"
+echo "==> Building $TARGET (API $API, gesture variant: $GESTURE_VARIANT)"
+cargo build --locked --release --target "$TARGET" --bin "$PROJECT_NAME" "${FEATURE_ARGS[@]}"
 
 BIN="$ROOT/target/$TARGET/release/$PROJECT_NAME"
 file "$BIN" | grep -Eq 'ARM aarch64|AArch64'
@@ -117,6 +178,7 @@ fi
 ) > "$SUMS_OUT"
 
 echo
+echo "Gesture variant: $GESTURE_VARIANT"
 echo "Android binary: $BIN"
 echo "Release binary: $BIN_OUT"
 echo "Vendor ZIP:     $ZIP_OUT"
