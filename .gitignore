@@ -1,0 +1,21 @@
+# Rust and Android build output
+/target/
+/build/
+/dist/
+/vendor/
+/prebuilt/
+
+# Generated or packaged artifacts
+*.a
+*.d
+*.o
+*.so
+*.zip
+*.log
+*.tmp
+
+# Local editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp

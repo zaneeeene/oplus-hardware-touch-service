@@ -1,0 +1,36 @@
+# Kernel configuration for OPlus Touch HAL support
+
+config TOUCHSCREEN_XIAOMI_TOUCH_HAL
+	tristate "Xiaomi Touch HAL Interface"
+	depends on INPUT_TOUCHSCREEN
+	help
+	  This driver provides the /dev/xiaomi-touch misc device and
+	  /proc/xiaomi-touch interface for userspace touch HAL.
+
+	  It implements the ioctl interface compatible with Xiaomi's
+	  xiaomi_touch.h for controlling AOD, DT2W, FOD, gestures, etc.
+
+	  Required for OPlus Touch HAL on Redmi Note 12 4G (topaz/SM6225).
+
+config TOUCHSCREEN_XIAOMI_TOUCH_HAL_GESTURES
+	bool "Enable gesture support in xiaomi-touch"
+	depends on TOUCHSCREEN_XIAOMI_TOUCH_HAL
+	default y
+	help
+	  Enable gesture detection and reporting via the xiaomi-touch
+	  interface. This allows userspace to configure gesture masks
+	  and receive gesture events.
+
+config TOUCHSCREEN_XIAOMI_TOUCH_HAL_PROCFS
+	bool "Enable /proc/xiaomi-touch interface"
+	depends on TOUCHSCREEN_XIAOMI_TOUCH_HAL
+	default y
+	help
+	  Create /proc/xiaomi-touch for legacy compatibility.
+
+config TOUCHSCREEN_XIAOMI_TOUCH_HAL_DEBUGFS
+	bool "Enable debugfs interface for xiaomi-touch"
+	depends on TOUCHSCREEN_XIAOMI_TOUCH_HAL && DEBUG_FS
+	default n
+	help
+	  Create debugfs entries for debugging touch modes and state.

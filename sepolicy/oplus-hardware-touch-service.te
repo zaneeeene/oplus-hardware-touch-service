@@ -1,0 +1,85 @@
+# Vendor SELinux policy for the standalone topaz touch/display daemon.
+#
+# Merge this file into the device vendor policy. It uses existing topaz labels
+# for the touch nodes instead of relabeling shared driver interfaces.
+
+type oplus_hardware_touch_service, domain;
+type oplus_hardware_touch_service_exec, exec_type, vendor_file_type, file_type;
+type oplus_hardware_touch_service_panel_service, service_manager_type, hal_service_type, protected_service;
+
+init_daemon_domain(oplus_hardware_touch_service)
+
+# Touch ABI and gesture arming:
+#   /dev/xiaomi-touch  -> touchfeature_device
+#   /proc/tp_gesture   -> proc_touchpad
+allow oplus_hardware_touch_service touchfeature_device:chr_file rw_file_perms;
+allow oplus_hardware_touch_service proc_touchpad:file rw_file_perms;
+
+# Touchscreen evdev and the uinput wake/preview injector. AOSP labels
+# /dev/uinput as uhid_device; uinput_device is not a real topaz policy type.
+allow oplus_hardware_touch_service input_device:chr_file rw_file_perms;
+allow oplus_hardware_touch_service uhid_device:chr_file rw_file_perms;
+
+# Xiaomi display/doze nodes. The driver's sysfs nodes are already labelled
+# vendor_sysfs_graphics; /dev/mi_display/disp_feature is a graphics device.
+allow oplus_hardware_touch_service graphics_device:chr_file rw_file_perms;
+allow oplus_hardware_touch_service vendor_sysfs_graphics:dir r_dir_perms;
+allow oplus_hardware_touch_service vendor_sysfs_graphics:file rw_file_perms;
+allow oplus_hardware_touch_service vendor_sysfs_graphics:lnk_file r_file_perms;
+
+# Optional /sys/class/touch nodes used by the legacy Xiaomi touch HAL.
+allow oplus_hardware_touch_service vendor_sysfs_touch:dir r_dir_perms;
+allow oplus_hardware_touch_service vendor_sysfs_touch:file rw_file_perms;
+allow oplus_hardware_touch_service vendor_sysfs_touch:lnk_file r_file_perms;
+
+# Raise-to-wake uses a one-second auto-expiring wake lock before draining the
+# sensor event queue.
+allow oplus_hardware_touch_service sysfs_wake_lock:file rw_file_perms;
+
+# Logging.
+allow oplus_hardware_touch_service self:unix_stream_socket create_stream_socket_perms;
+allow oplus_hardware_touch_service logd:unix_stream_socket connectto;
+allow oplus_hardware_touch_service logd_socket:sock_file write;
+
+# Screen state, boot state and vendor defaults.
+get_prop(oplus_hardware_touch_service, { debug_prop system_prop vendor_default_prop })
+
+# AIDL service manager and the display-panel service queried by OPlus SystemUI.
+allow oplus_hardware_touch_service servicemanager:binder call;
+allow oplus_hardware_touch_service oplus_hardware_touch_service_panel_service:service_manager { add find };
+allow platform_app oplus_hardware_touch_service_panel_service:service_manager find;
+allow system_app oplus_hardware_touch_service_panel_service:service_manager find;
+allow priv_app oplus_hardware_touch_service_panel_service:service_manager find;
+allow system_server oplus_hardware_touch_service_panel_service:service_manager find;
+allow platform_app oplus_hardware_touch_service:binder { call transfer };
+allow system_app oplus_hardware_touch_service:binder { call transfer };
+allow priv_app oplus_hardware_touch_service:binder { call transfer };
+allow system_server oplus_hardware_touch_service:binder { call transfer };
+allow oplus_hardware_touch_service platform_app:binder transfer;
+allow oplus_hardware_touch_service system_app:binder transfer;
+allow oplus_hardware_touch_service priv_app:binder transfer;
+allow oplus_hardware_touch_service system_server:binder transfer;
+allow platform_app oplus_hardware_touch_service:fd use;
+allow system_app oplus_hardware_touch_service:fd use;
+allow priv_app oplus_hardware_touch_service:fd use;
+allow system_server oplus_hardware_touch_service:fd use;
+
+# Android sensor-manager client for xiaomi.sensor.pickup.
+allow oplus_hardware_touch_service sensorservice_service:service_manager find;
+allow oplus_hardware_touch_service sensorservice_service:binder { call transfer };
+allow oplus_hardware_touch_service system_server:binder { call transfer };
+allow oplus_hardware_touch_service system_server:fd use;
+allow system_server oplus_hardware_touch_service:binder transfer;
+allow system_server oplus_hardware_touch_service:fd use;
+
+# Raise-to-wake uses `/system/bin/cmd power wakeup`; AOD defaults use
+# `/system/bin/cmd settings` for the one-time secure-setting bootstrap.
+allow oplus_hardware_touch_service system_file:file { execute execute_no_trans getattr map open read };
+allow oplus_hardware_touch_service settings_service:service_manager find;
+allow oplus_hardware_touch_service settings_service:binder { call transfer };
+allow oplus_hardware_touch_service input_service:service_manager find;
+allow oplus_hardware_touch_service input_service:binder { call transfer };
+allow oplus_hardware_touch_service power_service:service_manager find;
+allow oplus_hardware_touch_service power_service:binder { call transfer };
+allow oplus_hardware_touch_service activity_service:service_manager find;
+allow oplus_hardware_touch_service activity_service:binder { call transfer };

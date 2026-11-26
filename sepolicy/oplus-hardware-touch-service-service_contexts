@@ -1,0 +1,2 @@
+# Stable AIDL service instance queried by OPlus SystemUI / SystemUI's AOD code.
+vendor.oplus.hardware.displaypanelfeature.IDisplayPanelFeature/default u:object_r:oplus_hardware_touch_service_panel_service:s0

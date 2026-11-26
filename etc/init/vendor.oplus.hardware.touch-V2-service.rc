@@ -1,0 +1,33 @@
+# OPlus hardware touch service for topaz (Redmi Note 12 4G)
+#
+# The daemon is long-lived: it owns evdev/uinput readers and must not be
+# marked oneshot. It runs as root only so it can open the touch misc device,
+# /proc/tp_gesture and /dev/uinput; the SELinux domain remains the real
+# confinement boundary.
+#
+# The executable uses the required HAL name
+# vendor.oplus.hardware.touch-V2-service. The init service name is kept short
+# because its init.svc.* property must fit Android's property-name limit.
+
+service oplus-touch-service /vendor/bin/vendor.oplus.hardware.touch-V2-service --foreground
+    class main
+    user root
+    group root system input
+    capabilities SYS_RESOURCE
+    seclabel u:r:oplus_hardware_touch_service:s0
+    disabled
+
+on late-fs
+    start oplus-touch-service
+
+on property:vendor.touch.hal.enable=1
+    start oplus-touch-service
+
+on property:vendor.touch.hal.enable=0
+    stop oplus-touch-service
+
+# The Android sensor queue is owned by sensorservice in system_server. A
+# system_server crash recreates zygote and silently kills the queue; restart
+# the daemon so raise-to-wake reconnects instead of staying dead until reboot.
+on property:init.svc.zygote=restarting
+    restart oplus-touch-service
