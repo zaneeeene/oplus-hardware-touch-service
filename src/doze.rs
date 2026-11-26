@@ -32,8 +32,8 @@ const LOW_AOD_MAX_REGISTER: i32 = 200;
 
 const APPLY_LATE_MS: i32 = 100;
 const SETTLE_MS: i32 = 400;
-const CLASSIC_DBV_CHECK_MS: [i32; 4] = [300, 800, 1500, 3000];
-const DBV_FALLBACK_WRITE_MS: [i32; 3] = [440, 1500, 3000];
+const CLASSIC_DBV_CHECK_MS: i32 = 300;
+const DBV_FALLBACK_WRITE_MS: i32 = 440;
 const AWAKE_RECHECK_MS: [i32; 2] = [300, 800];
 const RECHECK_MS: [i32; 13] = [
     100, 120, 160, 200, 240, 280, 300, 340, 440, 600, 800, 1500, 3000,
@@ -91,7 +91,7 @@ struct DozeKeeper {
     level: u32,
     dbv: i32,
     follow_fade: bool,
-    dbv_fallback_writes: u8,
+    dbv_fallback_written: bool,
     awake_cleanup_done: bool,
 }
 
@@ -103,7 +103,7 @@ impl DozeKeeper {
             level: DOZE_HIGH,
             dbv: AOD_DBV_MAX,
             follow_fade: false,
-            dbv_fallback_writes: 0,
+            dbv_fallback_written: false,
             awake_cleanup_done: false,
         }
     }
@@ -140,7 +140,7 @@ impl DozeKeeper {
             if in_aod {
                 let entered = !matches!(previous, 3 | 4);
                 if entered {
-                    self.dbv_fallback_writes = 0;
+                    self.dbv_fallback_written = false;
                 }
                 let register = read_int(&self.config.backlight_path);
 
@@ -163,12 +163,9 @@ impl DozeKeeper {
                     }
                 } else {
                     // Classic clocks and static images pass no AOD brightness.
-                    self.level = self.config.classic_doze_level.clamp(DOZE_HIGH, DOZE_LOW);
-                    dbv = self
-                        .config
-                        .classic_dbv
-                        .clamp(AOD_DBV_MIN as u32, AOD_DBV_MAX as u32)
-                        as i32;
+                    let (level, classic_dbv) = classic_aod_target(&self.config);
+                    self.level = level;
+                    dbv = classic_dbv;
                 }
 
                 let dbv_changed = dbv != self.dbv;
@@ -192,11 +189,11 @@ impl DozeKeeper {
                 // transition, and the kernel reprograms the level on the next
                 // AOD entry anyway.
                 self.follow_fade = false;
-                self.dbv_fallback_writes = 0;
+                self.dbv_fallback_written = false;
                 self.awake_cleanup_done = false;
             } else if state == 2 && previous != 2 {
                 self.follow_fade = false;
-                self.dbv_fallback_writes = 0;
+                self.dbv_fallback_written = false;
                 self.awake_cleanup_done = false;
                 self.apply(DOZE_OFF);
             } else if state == -1 {
@@ -244,9 +241,8 @@ impl DozeKeeper {
                 && classic
                 && matches!(at, 300 | 800 | 1500 | 3000)
                 && read_int(&self.config.doze_brightness_path) >= 0;
-            let dbv_at = !late_at
-                && in_aod
-                && (dbv_pending || (classic && CLASSIC_DBV_CHECK_MS.contains(&at)));
+            let dbv_at =
+                !late_at && in_aod && (dbv_pending || (classic && at == CLASSIC_DBV_CHECK_MS));
             let awake_at = !late_at && awake && AWAKE_RECHECK_MS.contains(&at);
 
             if (late_at && !apply_late) || (!late_at && !level_at && !dbv_at && !awake_at) {
@@ -276,16 +272,22 @@ impl DozeKeeper {
                 }
             }
 
-            if self.follow_fade && matches!(at, 300 | 800 | 1500) {
+            if dbv_at && self.follow_fade {
                 let register = read_int(&self.config.backlight_path);
-                if (0..MIN_FADE_REGISTER).contains(&register) {
+                if should_reclassify_fade(self.follow_fade, dbv_pending, register) {
                     // A full-screen fade that collapsed to SystemUI's fallback
-                    // is actually a classic/static style.
+                    // is actually a classic/static style. Check this at every
+                    // dense DBV point: waiting until 300 ms leaves a black
+                    // frame/mask visible during the ON -> AOD transition.
+                    debug!(
+                        "Full-screen AOD fade collapsed at {at} ms (backlight {register}); using classic AOD"
+                    );
                     self.follow_fade = false;
-                    self.dbv = self.config.classic_dbv as i32;
-                    if self.level != DOZE_HIGH {
-                        self.level = DOZE_HIGH;
-                        self.apply(self.level);
+                    let (level, classic_dbv) = classic_aod_target(&self.config);
+                    self.dbv = classic_dbv;
+                    if self.level != level {
+                        self.level = level;
+                        self.apply(level);
                     }
                     dbv_pending = true;
                 }
@@ -297,7 +299,7 @@ impl DozeKeeper {
             }
 
             if dbv_at {
-                let fallback_allowed = DBV_FALLBACK_WRITE_MS.contains(&at);
+                let fallback_allowed = at == DBV_FALLBACK_WRITE_MS;
                 if self.sync_dbv(at >= SETTLE_MS, fallback_allowed) && at >= SETTLE_MS {
                     dbv_pending = false;
                 }
@@ -323,17 +325,14 @@ impl DozeKeeper {
         }
         if dbv < 0 {
             // Some mi_display kernels do not implement DCS readback. Wait
-            // until the panel has definitely entered AOD, then make one
-            // fallback write per AOD entry. Repeating it on every retry can
-            // flash the panel while it is still finishing the ON -> doze
-            // transition.
-            if should_write_dbv_fallback(settled, fallback_allowed, self.dbv_fallback_writes) {
-                debug!(
-                    "AOD DCS readback unavailable; writing settled DBV fallback {}",
-                    self.dbv_fallback_writes + 1
-                );
-                self.write_dbv(self.dbv);
-                self.dbv_fallback_writes += 1;
+            // until the panel has definitely entered AOD, then make at most
+            // one fallback write per AOD entry. Repeating this at 1.5/3 s can
+            // visibly step the brightness of static/classic AOD styles.
+            if should_write_dbv_fallback(settled, fallback_allowed, self.dbv_fallback_written)
+                && self.write_dbv(self.dbv)
+            {
+                debug!("AOD DCS readback unavailable; wrote one settled DBV fallback");
+                self.dbv_fallback_written = true;
                 return true;
             }
             return false;
@@ -346,8 +345,8 @@ impl DozeKeeper {
             self.dbv,
             read_int(&self.config.backlight_path),
             settled,
-        ) {
-            self.write_dbv(self.dbv);
+        ) && self.write_dbv(self.dbv)
+        {
             return true;
         }
         false
@@ -355,21 +354,25 @@ impl DozeKeeper {
 
     fn write_aod_dbv(&self) {
         if ScreenState::read_tracing().is_some_and(ScreenState::is_doze) {
-            self.write_dbv(self.dbv);
+            let _ = self.write_dbv(self.dbv);
         }
     }
 
-    fn write_dbv(&self, dbv: i32) {
+    fn write_dbv(&self, dbv: i32) -> bool {
         let command = format!(
             "00 00 00 39 00 00 00 00 00 03 51 {:02X} {:02X}",
             (dbv >> 8) & 0xff,
             dbv & 0xff
         );
-        if let Err(error) = write_mipi(&self.config.mipi_rw_path, &command) {
-            debug!(
-                "mi_display DBV write failed through {}: {error}",
-                self.config.mipi_rw_path.display()
-            );
+        match write_mipi(&self.config.mipi_rw_path, &command) {
+            Ok(()) => true,
+            Err(error) => {
+                debug!(
+                    "mi_display DBV write failed through {}: {error}",
+                    self.config.mipi_rw_path.display()
+                );
+                false
+            }
         }
     }
 
@@ -448,8 +451,21 @@ fn should_write_dbv(observed: i32, target: i32, backlight: i32, settled: bool) -
     observed >= 0 && observed != target && (settled || observed != backlight)
 }
 
-fn should_write_dbv_fallback(settled: bool, fallback_allowed: bool, writes: u8) -> bool {
-    settled && fallback_allowed && writes < 3
+fn should_write_dbv_fallback(settled: bool, fallback_allowed: bool, already_written: bool) -> bool {
+    settled && fallback_allowed && !already_written
+}
+
+fn should_reclassify_fade(follow_fade: bool, dbv_pending: bool, register: i32) -> bool {
+    follow_fade && dbv_pending && (0..MIN_FADE_REGISTER).contains(&register)
+}
+
+fn classic_aod_target(config: &AodKeepaliveConfig) -> (u32, i32) {
+    (
+        config.classic_doze_level.clamp(DOZE_HIGH, DOZE_LOW),
+        config
+            .classic_dbv
+            .clamp(AOD_DBV_MIN as u32, AOD_DBV_MAX as u32) as i32,
+    )
 }
 
 fn should_retry_awake_cleanup(state: Option<ScreenState>, doze_level: i32) -> bool {
@@ -577,11 +593,34 @@ mod tests {
 
     #[test]
     fn unavailable_dbv_readback_has_bounded_settled_retries() {
-        assert!(!should_write_dbv_fallback(false, true, 0));
-        assert!(!should_write_dbv_fallback(true, false, 0));
-        assert!(should_write_dbv_fallback(true, true, 0));
-        assert!(should_write_dbv_fallback(true, true, 2));
-        assert!(!should_write_dbv_fallback(true, true, 3));
+        assert!(!should_write_dbv_fallback(false, true, false));
+        assert!(!should_write_dbv_fallback(true, false, false));
+        assert!(should_write_dbv_fallback(true, true, false));
+        assert!(!should_write_dbv_fallback(true, true, true));
+    }
+
+    #[test]
+    fn collapsed_full_screen_fade_switches_to_classic_immediately() {
+        assert!(should_reclassify_fade(true, true, 8));
+        assert!(should_reclassify_fade(true, true, 0));
+        assert!(!should_reclassify_fade(true, true, MIN_FADE_REGISTER));
+        assert!(!should_reclassify_fade(true, false, 8));
+        assert!(!should_reclassify_fade(false, true, 8));
+        assert!(!should_reclassify_fade(true, true, -1));
+    }
+
+    #[test]
+    fn classic_target_is_clamped_once() {
+        let mut config = AodKeepaliveConfig::default();
+        assert_eq!(classic_aod_target(&config), (DOZE_HIGH, AOD_DBV_MAX));
+
+        config.classic_doze_level = 99;
+        config.classic_dbv = 1;
+        assert_eq!(classic_aod_target(&config), (DOZE_LOW, AOD_DBV_MIN));
+
+        config.classic_doze_level = 0;
+        config.classic_dbv = 9999;
+        assert_eq!(classic_aod_target(&config), (DOZE_HIGH, AOD_DBV_MAX));
     }
 
     #[test]

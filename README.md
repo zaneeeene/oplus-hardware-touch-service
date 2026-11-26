@@ -33,9 +33,9 @@ only as an ABI reference; no other device kernel tree is touched.
   `134`), plus the touch driver's native `KEY_GOTO` signal.
 - Keeps classic AOD/static-image/analog-clock styles visible through the
   `mi_display` doze level and MIPI DCS brightness commands.
-- Follows the full-screen AOD fade when the panel exposes it, reasserts the
-  classic AOD DBV after the transition settles, and retries a missing DCS
-  readback only at bounded, settled points.
+- Follows the full-screen AOD fade when the panel exposes it, falls back to the
+  classic AOD path as soon as the fade collapses, and performs at most one
+  settled DBV fallback when DCS readback is unavailable.
 - Serves `vendor.oplus.hardware.displaypanelfeature.IDisplayPanelFeature`
   feature `217` as `15` (panoramic, all-day, smooth transition, doze-direct)
   and feature `211` as `16` (local HBM UDFPS). This is what lets OPlus SystemUI
@@ -263,11 +263,16 @@ enters doze or doze-suspend:
 - classic clocks/static images use doze level `1` and DBV `808`;
 - full-screen AOD follows the panel fade where possible;
 - if DCS readback is unavailable, the keeper still writes the desired AOD DBV
-  instead of leaving the panel nearly black, with at most three settled
-  fallback writes per AOD entry;
+  instead of leaving the panel nearly black, with at most one settled fallback
+  write per AOD entry;
 - if the low framework fallback makes DCS read back the same value as the
   normal backlight node, the settled classic-AOD path still restores DBV
   `808`; this is the case which previously left AOD dim indefinitely;
+- a full-screen fade that collapses below backlight register `40` switches to
+  the classic path at the next dense DBV check rather than waiting for 300 ms,
+  avoiding the black frame during the ON -> AOD transition;
+- classic AOD checks DBV once at 300 ms, avoiding repeated brightness
+  corrections while entering or leaving AOD;
 - the panel doze level is re-applied if it is cleared during an extended AOD
   session;
 - waking to the lockscreen sends `DOZE_OFF` immediately and rechecks it at
