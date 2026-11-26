@@ -297,7 +297,7 @@ settings put secure oplus_customize_gesture_wake_up_arouse 0
 DT2W/raise-to-wake values, `/proc/tp_gesture`, input capabilities, panel
 backlight/doze nodes, SELinux denials, bounded logcat, and bounded evdev
 events. It then prompts for the screen-on, AOD, preview, immediate DT2W,
-spammed DT2W, and long full-screen AOD steps:
+spammed DT2W, long full-screen AOD, and raise-to-wake probe steps:
 
 ```bash
 su -c 'sh /sdcard/Download/capture-aod-dt2w-logs.sh /sdcard/Download/aod-dt2w-logs'
@@ -309,11 +309,27 @@ automatically. Root is required for the Settings XML snapshots, panel nodes,
 and kernel log. The default output directory is
 `/sdcard/Download/aod-dt2w-logs-<UTC timestamp>`; if that location cannot be
 created, it falls back to `/data/local/tmp`. Both logcat and evdev capture stop
-when the six-step sequence finishes, with a hard 15-minute limit.
+when the seven-step sequence finishes, with a hard 15-minute limit.
 
 The sensor-manager package identity is `vendor.oplus.hardware.raise2wake`,
 matching the working reference binary's `ASensorManager_getInstanceForPackage`
 path. The non-wakeup pickup sensor is selected first by default.
+
+If raise-to-wake does not arm, run the on-device sensor probe as root:
+
+```bash
+su -c '/vendor/bin/vendor.oplus.hardware.touch-V2-service \
+  --diagnose-sensors --sensor-seconds 30'
+```
+
+It prints every Android sensor with its name, string type, numeric type,
+handle, and wake-up flag, then subscribes to the selected pickup sensor for 30
+seconds. Keep the screen off, leave the phone still, then lift it. The probe
+temporarily holds a wake lock so AP suspend cannot hide the event stream; the
+normal HAL arms only while the screen is off/dozing and does not hold a
+continuous lock. The HAL also falls back from the exact
+`xiaomi.sensor.pickup` string type to vendor type `33171036` and
+`ASensorManager_getDefaultSensorEx` for ported ROMs that rename the sensor.
 
 ## API 35+
 

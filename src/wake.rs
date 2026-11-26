@@ -17,6 +17,11 @@ pub fn hold_wake_lock(name: &str, duration: Duration) {
     let _ = std::fs::write("/sys/power/wake_lock", request);
 }
 
+/// Release an explicitly held wake lock before its timeout expires.
+pub fn release_wake_lock(name: &str) {
+    let _ = std::fs::write("/sys/power/wake_unlock", name);
+}
+
 /// Request a full Android wake through the power service.
 ///
 /// This matches the proven `oplus-hardware-raise2wake` injection and avoids

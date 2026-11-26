@@ -129,8 +129,11 @@ capture_shell service-status.txt sh -c '
     printf "vendor.touch.hal.enable="
     getprop vendor.touch.hal.enable
     pidof vendor.oplus.hardware.touch-V2-service || true
-    ps -A | grep -E "vendor\.oplus\.hardware\.touch-V2-service|oplus-touch-service|system_server" || true
+    ps -A -Z | grep -E "vendor\.oplus\.hardware\.touch-V2-service|oplus-touch-service|system_server" || true
+    ls -lZ /vendor/bin/vendor.oplus.hardware.touch-V2-service 2>&1 || true
+    sha256sum /vendor/bin/vendor.oplus.hardware.touch-V2-service 2>&1 || true
 '
+capture_shell sensorservice.txt dumpsys sensorservice
 capture_shell input-devices.txt cat /proc/bus/input/devices
 capture_shell input-capabilities.txt getevent -lp
 capture_shell tp-gesture.txt cat /proc/tp_gesture
@@ -224,6 +227,18 @@ step "3. Single-tap the AOD twice (the one-tap preview test)"
 step "4. Double-tap immediately after the first AOD frame appears"
 step "5. Turn the screen back off, then spam double-tap several times"
 step "6. Leave full-screen AOD visible for at least several minutes"
+step "7. Raise-to-wake probe: leave the screen off and keep the phone still"
+
+printf '%s\n' "Running the installed HAL sensor probe for 20 seconds."
+printf '%s\n' "Keep the screen off; after 3 seconds, lift the phone and hold it upright."
+capture_shell sensor-probe.txt sh -c '
+    if [ ! -x /vendor/bin/vendor.oplus.hardware.touch-V2-service ]; then
+        echo "Installed HAL sensor probe unavailable"
+        exit 0
+    fi
+    timeout 30 /vendor/bin/vendor.oplus.hardware.touch-V2-service \
+        --diagnose-sensors --sensor-seconds 20
+'
 
 printf '\n%s\n' "Stopping background capture..."
 cleanup
@@ -260,6 +275,7 @@ Output: $OUT
 Files:
   properties.txt             Full getprop output
   service-status.txt         Init/service and process state
+  sensorservice.txt          Framework sensor list and active connections
   settings_*.xml             SettingsProvider XML snapshots
   settings-values.txt        Relevant values in system/secure/global
   tp-gesture.txt             Current /proc/tp_gesture value
@@ -268,6 +284,7 @@ Files:
   session-logcat.txt         Bounded logcat during all six interaction steps
   session-evdev.txt          Bounded getevent input stream
   session-panel-samples.txt  5 Hz screen/backlight/doze/tp_gesture samples
+  sensor-probe.txt           HAL sensor enumeration and 20-second pickup probe
   session-highlights.txt     HAL/AOD/DT2W/AVC lines from logcat
   dmesg-highlights.txt       Relevant kernel lines from the final dmesg tail
   dmesg-tail.txt             Last 4000 kernel messages

@@ -4,7 +4,8 @@ use clap::Parser;
 use log::{info, warn};
 
 use oplus_hardware_touch_service::{
-    procfs, run_touch_hal, start_panel_feature_service, xiaomi_touch, TouchConfig, TouchResult,
+    procfs, raise_to_wake, run_touch_hal, start_panel_feature_service, xiaomi_touch, TouchConfig,
+    TouchResult,
 };
 
 #[derive(Parser, Debug)]
@@ -22,6 +23,14 @@ struct Args {
     /// Test mode - run self tests
     #[arg(long)]
     test: bool,
+
+    /// List Android sensors and print pickup events for on-device diagnosis
+    #[arg(long)]
+    diagnose_sensors: bool,
+
+    /// Duration of --diagnose-sensors capture
+    #[arg(long, default_value_t = 30)]
+    sensor_seconds: u64,
 }
 
 #[tokio::main]
@@ -33,6 +42,10 @@ async fn main() -> TouchResult<()> {
 
     if args.test {
         return run_tests().await;
+    }
+
+    if args.diagnose_sensors {
+        return raise_to_wake::diagnose_sensors(args.sensor_seconds);
     }
 
     info!("OPlus hardware touch service starting...");

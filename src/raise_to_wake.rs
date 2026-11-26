@@ -7,6 +7,7 @@
 //! suspend because the vendor sensor HAL owns delivery.
 
 use std::ffi::{CStr, CString};
+use std::fmt::Write as _;
 use std::process::{Command, Stdio};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -29,6 +30,8 @@ const ALOOPER_POLL_ERROR: i32 = -4;
 const EVENT_BATCH: usize = 8;
 const POLL_TIMEOUT_MS: i32 = 500;
 const SETTING_RECHECK: Duration = Duration::from_secs(2);
+const DISCOVERY_WARNING_INTERVAL: Duration = Duration::from_secs(30);
+const PICKUP_TYPE_CODE: i32 = 33171036;
 
 #[derive(Debug, Clone)]
 pub struct RaiseToWakeEvent {
@@ -59,8 +62,11 @@ struct AndroidApi {
     _handle: *mut libc::c_void,
     get_instance: unsafe extern "C" fn(*const libc::c_char) -> *mut ASensorManager,
     get_sensor_list: unsafe extern "C" fn(*mut ASensorManager, *mut *const *const ASensor) -> i32,
+    get_default_sensor: unsafe extern "C" fn(*mut ASensorManager, i32, bool) -> *const ASensor,
     get_type: unsafe extern "C" fn(*const ASensor) -> i32,
+    get_name: unsafe extern "C" fn(*const ASensor) -> *const libc::c_char,
     get_string_type: unsafe extern "C" fn(*const ASensor) -> *const libc::c_char,
+    get_handle: unsafe extern "C" fn(*const ASensor) -> i32,
     is_wakeup_sensor: unsafe extern "C" fn(*const ASensor) -> i32,
     looper_prepare: unsafe extern "C" fn(i32) -> *mut ALooper,
     create_event_queue: unsafe extern "C" fn(
@@ -86,28 +92,67 @@ impl AndroidApi {
             return None;
         }
 
-        unsafe {
-            Some(Self {
-                _handle: handle,
-                get_instance: symbol(handle, c"ASensorManager_getInstanceForPackage")?,
-                get_sensor_list: symbol(handle, c"ASensorManager_getSensorList")?,
-                get_type: symbol(handle, c"ASensor_getType")?,
-                get_string_type: symbol(handle, c"ASensor_getStringType")?,
-                is_wakeup_sensor: symbol(handle, c"ASensor_isWakeUpSensor")?,
-                looper_prepare: symbol(handle, c"ALooper_prepare")?,
-                create_event_queue: symbol(handle, c"ASensorManager_createEventQueue")?,
-                destroy_event_queue: symbol(handle, c"ASensorManager_destroyEventQueue")?,
-                enable_sensor: symbol(handle, c"ASensorEventQueue_enableSensor")?,
-                disable_sensor: symbol(handle, c"ASensorEventQueue_disableSensor")?,
-                get_events: symbol(handle, c"ASensorEventQueue_getEvents")?,
-                looper_poll_all: symbol(handle, c"ALooper_pollAll")?,
-            })
+        let api = unsafe {
+            (|| {
+                Some(Self {
+                    _handle: handle,
+                    get_instance: required_symbol(handle, c"ASensorManager_getInstanceForPackage")?,
+                    get_sensor_list: required_symbol(handle, c"ASensorManager_getSensorList")?,
+                    get_default_sensor: required_symbol(
+                        handle,
+                        c"ASensorManager_getDefaultSensorEx",
+                    )?,
+                    get_type: required_symbol(handle, c"ASensor_getType")?,
+                    get_name: required_symbol(handle, c"ASensor_getName")?,
+                    get_string_type: required_symbol(handle, c"ASensor_getStringType")?,
+                    get_handle: required_symbol(handle, c"ASensor_getHandle")?,
+                    is_wakeup_sensor: required_symbol(handle, c"ASensor_isWakeUpSensor")?,
+                    looper_prepare: required_symbol(handle, c"ALooper_prepare")?,
+                    create_event_queue: required_symbol(
+                        handle,
+                        c"ASensorManager_createEventQueue",
+                    )?,
+                    destroy_event_queue: required_symbol(
+                        handle,
+                        c"ASensorManager_destroyEventQueue",
+                    )?,
+                    enable_sensor: required_symbol(handle, c"ASensorEventQueue_enableSensor")?,
+                    disable_sensor: required_symbol(handle, c"ASensorEventQueue_disableSensor")?,
+                    get_events: required_symbol(handle, c"ASensorEventQueue_getEvents")?,
+                    looper_poll_all: required_symbol(handle, c"ALooper_pollAll")?,
+                })
+            })()
+        };
+        if api.is_none() {
+            unsafe { libc::dlclose(handle) };
         }
+        api
     }
 }
 
+impl Drop for AndroidApi {
+    fn drop(&mut self) {
+        unsafe { libc::dlclose(self._handle) };
+    }
+}
+
+#[derive(Clone)]
 struct PickupSensor {
     sensor: *const ASensor,
+    name: String,
+    string_type: String,
+    handle: i32,
+    type_code: i32,
+    wakeup: bool,
+    source: &'static str,
+}
+
+#[derive(Clone)]
+struct SensorDescriptor {
+    sensor: *const ASensor,
+    name: String,
+    string_type: String,
+    handle: i32,
     type_code: i32,
     wakeup: bool,
 }
@@ -194,9 +239,19 @@ impl RaiseToWakeManager {
     }
 
     fn run_sensor_loop(&self) {
-        let Some(api) = AndroidApi::load() else {
-            self.running.store(false, Ordering::Release);
-            return;
+        let mut last_load_warning = Instant::now() - DISCOVERY_WARNING_INTERVAL;
+        let api = loop {
+            if !self.running.load(Ordering::Acquire) {
+                return;
+            }
+            if let Some(api) = AndroidApi::load() {
+                break api;
+            }
+            if last_load_warning.elapsed() >= DISCOVERY_WARNING_INTERVAL {
+                warn!("Raise-to-wake: waiting for the Android sensor NDK API");
+                last_load_warning = Instant::now();
+            }
+            thread::sleep(Duration::from_secs(1));
         };
 
         let package = match CString::new(self.config.sensor_package.as_str()) {
@@ -207,36 +262,45 @@ impl RaiseToWakeManager {
                 return;
             }
         };
-        let mut discovery_warning_logged = false;
+        let mut last_discovery_warning = Instant::now() - DISCOVERY_WARNING_INTERVAL;
 
         // late-fs starts this daemon before sensorservice is guaranteed to be
         // ready. Keep trying instead of disabling raise-to-wake until reboot.
         while self.running.load(Ordering::Acquire) {
             let manager = unsafe { (api.get_instance)(package.as_ptr()) };
             if manager.is_null() {
-                if !discovery_warning_logged {
+                if last_discovery_warning.elapsed() >= DISCOVERY_WARNING_INTERVAL {
                     warn!("Raise-to-wake: waiting for the Android sensor manager");
-                    discovery_warning_logged = true;
+                    last_discovery_warning = Instant::now();
                 }
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
 
-            let Some(pickup) = find_pickup_sensor(&api, manager, &self.config) else {
-                if !discovery_warning_logged {
+            let descriptors = enumerate_sensors(&api, manager);
+            let Some(pickup) = select_pickup_sensor(&api, manager, &self.config, &descriptors)
+            else {
+                if last_discovery_warning.elapsed() >= DISCOVERY_WARNING_INTERVAL {
                     warn!(
-                        "Raise-to-wake: sensor '{}' is not published yet; retrying",
-                        self.config.sensor_type
+                        "Raise-to-wake: sensor '{}' / type {} is not published yet; retrying ({})",
+                        self.config.sensor_type,
+                        PICKUP_TYPE_CODE,
+                        summarize_sensors(&descriptors)
                     );
-                    discovery_warning_logged = true;
+                    last_discovery_warning = Instant::now();
                 }
                 thread::sleep(Duration::from_secs(1));
                 continue;
             };
-            discovery_warning_logged = false;
+            last_discovery_warning = Instant::now();
             info!(
-                "Raise-to-wake selected '{}' (type {}, wakeup={})",
-                self.config.sensor_type, pickup.type_code, pickup.wakeup
+                "Raise-to-wake selected name='{}' string='{}' type={} handle={} wakeup={} source={}",
+                pickup.name,
+                pickup.string_type,
+                pickup.type_code,
+                pickup.handle,
+                pickup.wakeup,
+                pickup.source
             );
 
             let looper = unsafe { (api.looper_prepare)(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS) };
@@ -257,37 +321,67 @@ impl RaiseToWakeManager {
             let mut enabled_at = Instant::now();
             let mut last_setting_check = Instant::now() - SETTING_RECHECK;
             let mut setting_enabled = false;
+            let mut last_setting_state = None;
+            let mut last_setting_error = Instant::now() - DISCOVERY_WARNING_INTERVAL;
+            let mut last_screen_state = None;
             let mut last_trigger = Instant::now() - Duration::from_secs(10);
+            let mut last_value = None;
             let mut fallback_injector = None;
-            let mut setting_warning_logged = false;
+            let mut last_arm_attempt = Instant::now() - Duration::from_secs(5);
 
             info!("Raise-to-wake sensor HAL loop is ready");
             while self.running.load(Ordering::Acquire) {
                 if last_setting_check.elapsed() >= SETTING_RECHECK {
                     last_setting_check = Instant::now();
-                    setting_enabled = self.setting_enabled();
-                    if self.config.require_setting && !setting_enabled && !setting_warning_logged {
-                        warn!(
-                            "Raise-to-wake is disabled by secure setting {}.{}; enable it in Settings",
-                            self.config.setting_namespace, self.config.setting_key
-                        );
-                        setting_warning_logged = true;
-                    } else if setting_enabled {
-                        setting_warning_logged = false;
+                    match self.setting_enabled() {
+                        Ok(enabled) => {
+                            setting_enabled = enabled;
+                            if last_setting_state != Some(enabled) {
+                                if enabled || !self.config.require_setting {
+                                    info!(
+                                        "Raise-to-wake setting {}.{} is enabled",
+                                        self.config.setting_namespace, self.config.setting_key
+                                    );
+                                } else {
+                                    warn!(
+                                        "Raise-to-wake is disabled by secure setting {}.{}; enable it in Settings",
+                                        self.config.setting_namespace, self.config.setting_key
+                                    );
+                                }
+                                last_setting_state = Some(enabled);
+                            }
+                        }
+                        Err(error) => {
+                            setting_enabled = false;
+                            if last_setting_error.elapsed() >= DISCOVERY_WARNING_INTERVAL {
+                                warn!(
+                                    "Raise-to-wake could not read secure setting {}.{}: {error}",
+                                    self.config.setting_namespace, self.config.setting_key
+                                );
+                                last_setting_error = Instant::now();
+                            }
+                        }
                     }
                 }
 
-                let screen_off = ScreenState::read().is_screen_off_or_doze();
-                let should_enable = screen_off && setting_enabled;
-                if should_enable != sensor_enabled {
+                let screen_state = ScreenState::read();
+                if last_screen_state != Some(screen_state) {
+                    debug!("Raise-to-wake screen state changed to {screen_state:?}");
+                    last_screen_state = Some(screen_state);
+                }
+                let should_enable = screen_state.is_screen_off_or_doze() && setting_enabled;
+                let retry_allowed = last_arm_attempt.elapsed() >= Duration::from_secs(5);
+                if should_enable != sensor_enabled && retry_allowed {
                     let result = if should_enable {
                         unsafe { (api.enable_sensor)(queue, pickup.sensor) }
                     } else {
                         unsafe { (api.disable_sensor)(queue, pickup.sensor) }
                     };
+                    last_arm_attempt = Instant::now();
                     if result == 0 {
                         sensor_enabled = should_enable;
                         enabled_at = Instant::now();
+                        last_value = None;
                         info!(
                             "Raise-to-wake sensor {}",
                             if sensor_enabled { "armed" } else { "disarmed" }
@@ -337,6 +431,14 @@ impl RaiseToWakeManager {
                             continue;
                         }
                         let value = event.data[0];
+                        if last_value != Some(value) {
+                            info!(
+                                "Raise-to-wake sensor value {:.1} ({})",
+                                value,
+                                pickup_value_label(value)
+                            );
+                            last_value = Some(value);
+                        }
                         if (value - 1.0).abs() > f32::EPSILON {
                             // 2.0 means put down. Do not wake for the initial
                             // "held" report or a subsequent table placement.
@@ -393,9 +495,9 @@ impl RaiseToWakeManager {
         info!("Raise-to-wake sensor loop stopped");
     }
 
-    fn setting_enabled(&self) -> bool {
+    fn setting_enabled(&self) -> Result<bool, String> {
         if !self.config.require_setting {
-            return true;
+            return Ok(true);
         }
 
         let output = Command::new("/system/bin/settings")
@@ -405,65 +507,331 @@ impl RaiseToWakeManager {
                 self.config.setting_key.as_str(),
             ])
             .stdin(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .output();
         match output {
             Ok(output) if output.status.success() => {
-                matches!(String::from_utf8_lossy(&output.stdout).trim(), "1" | "true")
+                let value = String::from_utf8_lossy(&output.stdout);
+                match value.trim() {
+                    "1" | "true" => Ok(true),
+                    "0" | "false" | "null" | "" => Ok(false),
+                    other => Err(format!("unexpected value {other:?}")),
+                }
             }
-            _ => false,
+            Ok(output) => Err(format!(
+                "settings exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(error) => Err(format!("failed to run /system/bin/settings: {error}")),
         }
     }
 }
 
-fn find_pickup_sensor(
-    api: &AndroidApi,
-    manager: *mut ASensorManager,
-    config: &RaiseToWakeConfig,
-) -> Option<PickupSensor> {
-    let expected = CString::new(config.sensor_type.as_str()).ok()?;
+/// Enumerate the framework's sensors and print pickup events for on-device
+/// troubleshooting. This is intentionally independent of the Settings gate and
+/// screen state so it can answer whether the sensor itself is usable.
+pub fn diagnose_sensors(duration_secs: u64) -> TouchResult<()> {
+    let config = RaiseToWakeConfig::default();
+    let duration_secs = duration_secs.clamp(5, 600);
+    let api = AndroidApi::load()
+        .ok_or_else(|| TouchError::RaiseToWake("Android sensor NDK API is unavailable".into()))?;
+    let package = CString::new(config.sensor_package.as_str())
+        .map_err(|_| TouchError::RaiseToWake("sensor package contains a NUL byte".into()))?;
+    let manager = unsafe { (api.get_instance)(package.as_ptr()) };
+    if manager.is_null() {
+        return Err(TouchError::RaiseToWake(
+            "ASensorManager_getInstanceForPackage returned null".into(),
+        ));
+    }
+
+    println!(
+        "Sensor package: {}; screen state: {:?}",
+        config.sensor_package,
+        ScreenState::read()
+    );
+    if config.require_setting {
+        let output = Command::new("/system/bin/settings")
+            .args([
+                "get",
+                config.setting_namespace.as_str(),
+                config.setting_key.as_str(),
+            ])
+            .stdin(Stdio::null())
+            .stderr(Stdio::piped())
+            .output();
+        match output {
+            Ok(output) if output.status.success() => println!(
+                "Setting {}.{}={}",
+                config.setting_namespace,
+                config.setting_key,
+                String::from_utf8_lossy(&output.stdout).trim()
+            ),
+            Ok(output) => println!(
+                "Setting read failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Err(error) => println!("Setting read failed: {error}"),
+        }
+    } else {
+        println!("Setting gate disabled");
+    }
+
+    let descriptors = enumerate_sensors(&api, manager);
+    println!("Android sensors ({}):", descriptors.len());
+    for sensor in &descriptors {
+        println!(
+            "  name='{}' string='{}' type={} handle={} wakeup={}",
+            sensor.name, sensor.string_type, sensor.type_code, sensor.handle, sensor.wakeup
+        );
+    }
+
+    let pickup = select_pickup_sensor(&api, manager, &config, &descriptors).ok_or_else(|| {
+        TouchError::RaiseToWake(format!(
+            "no pickup sensor matched '{}' or type {} ({})",
+            config.sensor_type,
+            PICKUP_TYPE_CODE,
+            summarize_sensors(&descriptors)
+        ))
+    })?;
+    println!(
+        "Selected name='{}' string='{}' type={} handle={} wakeup={} source={}",
+        pickup.name,
+        pickup.string_type,
+        pickup.type_code,
+        pickup.handle,
+        pickup.wakeup,
+        pickup.source
+    );
+
+    let looper = unsafe { (api.looper_prepare)(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS) };
+    if looper.is_null() {
+        return Err(TouchError::RaiseToWake("ALooper_prepare failed".into()));
+    }
+    let queue = unsafe { (api.create_event_queue)(manager, looper, 1, None, ptr::null_mut()) };
+    if queue.is_null() {
+        return Err(TouchError::RaiseToWake(
+            "sensor event queue creation failed".into(),
+        ));
+    }
+    let enable_result = unsafe { (api.enable_sensor)(queue, pickup.sensor) };
+    if enable_result != 0 {
+        unsafe { (api.destroy_event_queue)(manager, queue) };
+        return Err(TouchError::RaiseToWake(format!(
+            "ASensorEventQueue_enableSensor returned {enable_result}"
+        )));
+    }
+
+    const PROBE_LOCK: &str = "oplus_touch_sensor_probe";
+    wake::hold_wake_lock(PROBE_LOCK, Duration::from_secs(duration_secs + 5));
+    println!(
+        "Listening for {duration_secs}s. Keep the screen off, leave the phone still, then lift it."
+    );
+
+    let started = Instant::now();
+    let mut event_count = 0usize;
+    while started.elapsed() < Duration::from_secs(duration_secs) {
+        let poll = unsafe {
+            (api.looper_poll_all)(
+                POLL_TIMEOUT_MS,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+            )
+        };
+        if poll == ALOOPER_POLL_ERROR {
+            println!("Sensor poll error");
+            break;
+        }
+        if poll >= 0 {
+            wake::hold_wake_lock(PROBE_LOCK, Duration::from_secs(1));
+        }
+
+        loop {
+            let mut events: [ASensorEvent; EVENT_BATCH] = unsafe { std::mem::zeroed() };
+            let count = unsafe { (api.get_events)(queue, events.as_mut_ptr(), EVENT_BATCH) };
+            if count <= 0 {
+                break;
+            }
+            for event in events.iter().take(count as usize) {
+                event_count += 1;
+                println!(
+                    "event type={} value={:.3} label={} raw=[{:.3}, {:.3}, {:.3}, {:.3}]",
+                    event.type_,
+                    event.data[0],
+                    pickup_value_label(event.data[0]),
+                    event.data[0],
+                    event.data[1],
+                    event.data[2],
+                    event.data[3]
+                );
+            }
+        }
+    }
+
+    unsafe { (api.disable_sensor)(queue, pickup.sensor) };
+    unsafe { (api.destroy_event_queue)(manager, queue) };
+    wake::release_wake_lock(PROBE_LOCK);
+    println!("Sensor probe complete: {event_count} event(s)");
+
+    if event_count == 0 {
+        return Err(TouchError::RaiseToWake(
+            "sensor enabled but delivered no events".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn enumerate_sensors(api: &AndroidApi, manager: *mut ASensorManager) -> Vec<SensorDescriptor> {
     let mut list: *const *const ASensor = ptr::null();
     let count = unsafe { (api.get_sensor_list)(manager, &mut list) };
     if count <= 0 || list.is_null() {
-        return None;
+        return Vec::new();
     }
 
-    let mut non_wakeup = None;
-    let mut wakeup = None;
+    let mut sensors = Vec::with_capacity(count as usize);
     for index in 0..count as usize {
         let sensor = unsafe { *list.add(index) };
         if sensor.is_null() {
             continue;
         }
-        let type_name = unsafe { (api.get_string_type)(sensor) };
-        if type_name.is_null() {
-            continue;
-        }
-        let type_name = unsafe { CStr::from_ptr(type_name) };
-        if type_name != expected.as_c_str() {
+        sensors.push(describe_sensor(api, sensor));
+    }
+    sensors
+}
+
+fn describe_sensor(api: &AndroidApi, sensor: *const ASensor) -> SensorDescriptor {
+    let name = unsafe { (api.get_name)(sensor) };
+    let string_type = unsafe { (api.get_string_type)(sensor) };
+    SensorDescriptor {
+        sensor,
+        name: c_string(name),
+        string_type: c_string(string_type),
+        handle: unsafe { (api.get_handle)(sensor) },
+        type_code: unsafe { (api.get_type)(sensor) },
+        wakeup: unsafe { (api.is_wakeup_sensor)(sensor) != 0 },
+    }
+}
+
+fn select_pickup_sensor(
+    api: &AndroidApi,
+    manager: *mut ASensorManager,
+    config: &RaiseToWakeConfig,
+    descriptors: &[SensorDescriptor],
+) -> Option<PickupSensor> {
+    let mut exact_non_wakeup = None;
+    let mut exact_wakeup = None;
+    let mut typed_non_wakeup = None;
+    let mut typed_wakeup = None;
+
+    for descriptor in descriptors {
+        let exact = descriptor.string_type == config.sensor_type;
+        if !exact && descriptor.type_code != PICKUP_TYPE_CODE {
             continue;
         }
 
-        let is_wakeup = unsafe { (api.is_wakeup_sensor)(sensor) != 0 };
-        let type_code = unsafe { (api.get_type)(sensor) };
-        let candidate = PickupSensor {
-            sensor,
-            type_code,
-            wakeup: is_wakeup,
-        };
-        if is_wakeup {
-            wakeup.get_or_insert(candidate);
+        if exact {
+            if descriptor.wakeup {
+                exact_wakeup.get_or_insert_with(|| pickup_from(descriptor, "string-type"));
+            } else {
+                exact_non_wakeup.get_or_insert_with(|| pickup_from(descriptor, "string-type"));
+            }
+        } else if descriptor.wakeup {
+            typed_wakeup.get_or_insert_with(|| pickup_from(descriptor, "vendor-type"));
         } else {
-            non_wakeup.get_or_insert(candidate);
+            typed_non_wakeup.get_or_insert_with(|| pickup_from(descriptor, "vendor-type"));
         }
     }
 
-    if config.prefer_wakeup_sensor {
-        wakeup.or(non_wakeup)
+    let selected = if config.prefer_wakeup_sensor {
+        exact_wakeup
+            .or(exact_non_wakeup)
+            .or(typed_wakeup)
+            .or(typed_non_wakeup)
     } else {
         // Match the proven OPlus binary: it selects the non-wake-up variant
         // first, then wakes with `cmd power wakeup`.
-        non_wakeup.or(wakeup)
+        exact_non_wakeup
+            .or(exact_wakeup)
+            .or(typed_non_wakeup)
+            .or(typed_wakeup)
+    };
+    if selected.is_some() {
+        return selected;
+    }
+
+    // Some vendor sensor services hide the string type from third-party
+    // callers but still resolve the Xiaomi vendor type code. Try both
+    // variants so a renamed sensor in a ported HAL does not disable the
+    // feature completely.
+    for wakeup in if config.prefer_wakeup_sensor {
+        [true, false]
+    } else {
+        [false, true]
+    } {
+        let sensor = unsafe { (api.get_default_sensor)(manager, PICKUP_TYPE_CODE, wakeup) };
+        if !sensor.is_null() {
+            let descriptor = describe_sensor(api, sensor);
+            return Some(pickup_from(&descriptor, "default-sensor"));
+        }
+    }
+    None
+}
+
+fn pickup_from(descriptor: &SensorDescriptor, source: &'static str) -> PickupSensor {
+    PickupSensor {
+        sensor: descriptor.sensor,
+        name: descriptor.name.clone(),
+        string_type: descriptor.string_type.clone(),
+        handle: descriptor.handle,
+        type_code: descriptor.type_code,
+        wakeup: descriptor.wakeup,
+        source,
+    }
+}
+
+fn summarize_sensors(descriptors: &[SensorDescriptor]) -> String {
+    let mut candidates: Vec<_> = descriptors
+        .iter()
+        .filter(|sensor| {
+            sensor.type_code == PICKUP_TYPE_CODE
+                || sensor.string_type.to_ascii_lowercase().contains("pickup")
+                || sensor.name.to_ascii_lowercase().contains("pickup")
+        })
+        .collect();
+    if candidates.is_empty() {
+        candidates.extend(descriptors.iter().take(8));
+    }
+
+    let mut summary = format!("{} Android sensors", descriptors.len());
+    for sensor in candidates.into_iter().take(8) {
+        let _ = write!(
+            summary,
+            "; name='{}' string='{}' type={} handle={} wakeup={}",
+            sensor.name, sensor.string_type, sensor.type_code, sensor.handle, sensor.wakeup
+        );
+    }
+    summary
+}
+
+fn pickup_value_label(value: f32) -> &'static str {
+    if (value - 1.0).abs() <= f32::EPSILON {
+        "picked up"
+    } else if (value - 2.0).abs() <= f32::EPSILON {
+        "put down"
+    } else {
+        "unknown state"
+    }
+}
+
+fn c_string(pointer: *const libc::c_char) -> String {
+    if pointer.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -478,6 +846,17 @@ unsafe fn symbol<T: Copy>(handle: *mut libc::c_void, name: &CStr) -> Option<T> {
     } else {
         Some(unsafe { std::mem::transmute_copy(&pointer) })
     }
+}
+
+unsafe fn required_symbol<T: Copy>(handle: *mut libc::c_void, name: &CStr) -> Option<T> {
+    let value = unsafe { symbol(handle, name) };
+    if value.is_none() {
+        warn!(
+            "Raise-to-wake: libandroid.so is missing {}",
+            name.to_string_lossy()
+        );
+    }
+    value
 }
 
 fn dlerror() -> String {
@@ -495,4 +874,21 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pickup_values_match_xiaomi_hub_states() {
+        assert_eq!(pickup_value_label(1.0), "picked up");
+        assert_eq!(pickup_value_label(2.0), "put down");
+        assert_eq!(pickup_value_label(0.0), "unknown state");
+    }
+
+    #[test]
+    fn empty_sensor_list_has_useful_diagnostic() {
+        assert_eq!(summarize_sensors(&[]), "0 Android sensors");
+    }
 }
