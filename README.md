@@ -423,9 +423,9 @@ device-behavior observations:
   behavioral reference for pickup-sensor selection and Android power-wake
   injection. It is not redistributed in this repository.
 
-No source or configuration from the Xiaomi MT6833 kernel tree or other
-unrelated device kernels was used or modified. Kernel trees were consulted
-only for the SM6225/topaz interfaces relevant to this userspace service.
+No unrelated device-kernel source or configuration was used or modified.
+Kernel trees were consulted only for the SM6225/topaz interfaces relevant to
+this userspace service.
 
 ## License
 
