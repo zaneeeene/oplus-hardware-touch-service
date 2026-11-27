@@ -138,14 +138,230 @@ vendor tree are ignored by Git.
 
 ## Vendor installation
 
-Merge the ZIP's `vendor/` directory into the vendor image or vendor partition:
+The ZIP is an install-only vendor payload. Its complete layout is:
 
 ```text
-/vendor/bin/vendor.oplus.hardware.touch-V2-service
-/vendor/etc/init/vendor.oplus.hardware.touch-V2-service.rc
+README.md
+vendor/bin/vendor.oplus.hardware.touch-V2-service
+vendor/etc/init/vendor.oplus.hardware.touch-V2-service.rc
 ```
 
-The AOSP prebuilt recipe is included as `Android.mk`.
+Merge the ZIP's `vendor/` directory into the vendor image. The final device
+paths must be:
+
+```text
+/vendor/bin/vendor.oplus.hardware.touch-V2-service        root:root 0755
+/vendor/etc/init/vendor.oplus.hardware.touch-V2-service.rc root:root 0644
+```
+
+For a quick test on a rooted device with a writable vendor partition:
+
+```bash
+adb root
+adb remount
+adb push vendor/bin/vendor.oplus.hardware.touch-V2-service /vendor/bin/
+adb push vendor/etc/init/vendor.oplus.hardware.touch-V2-service.rc /vendor/etc/init/
+adb shell chown root:root /vendor/bin/vendor.oplus.hardware.touch-V2-service
+adb shell chmod 0755 /vendor/bin/vendor.oplus.hardware.touch-V2-service
+adb shell chown root:root /vendor/etc/init/vendor.oplus.hardware.touch-V2-service.rc
+adb shell chmod 0644 /vendor/etc/init/vendor.oplus.hardware.touch-V2-service.rc
+adb reboot
+```
+
+The init `.rc` must be present before boot so Android init parses the service.
+Pushing the files into a running system is not enough by itself.
+
+The AOSP prebuilt recipe is included in the source repository as `Android.mk`.
+
+### Required init label
+
+The included init service already contains:
+
+```text
+service oplus-touch-service /vendor/bin/vendor.oplus.hardware.touch-V2-service --foreground
+    class main
+    user root
+    group root system input
+    capabilities SYS_RESOURCE
+    seclabel u:r:oplus_hardware_touch_service:s0
+    disabled
+```
+
+The `seclabel` line requires the `oplus_hardware_touch_service` SELinux
+domain. Do not change the service to `u:r:su:s0`; use the vendor domain below.
+
+### Required file_contexts
+
+Add this entry to the device's vendor file contexts:
+
+```text
+/vendor/bin/vendor.oplus.hardware.touch-V2-service u:object_r:oplus_hardware_touch_service_exec:s0
+```
+
+In a ROM source tree, put it in the device vendor policy directory, normally
+as a file such as `sepolicy/vendor/file_contexts`. After flashing the rebuilt
+vendor image, the executable should report:
+
+```bash
+ls -Z /vendor/bin/vendor.oplus.hardware.touch-V2-service
+# u:object_r:oplus_hardware_touch_service_exec:s0
+```
+
+### Required service_contexts
+
+The display-panel AIDL service must be visible to SystemUI and
+`system_server`, otherwise panoramic/full-screen AOD falls back to the
+temporary energy-saving path. Add:
+
+```text
+vendor.oplus.hardware.displaypanelfeature.IDisplayPanelFeature/default u:object_r:oplus_hardware_touch_service_panel_service:s0
+```
+
+This is a vendor service context, normally placed in
+`vendor/etc/selinux/vendor_service_contexts` in a ROM build.
+
+### Required SELinux policy
+
+Merge this policy into the device vendor policy. It assumes the standard
+topaz labels listed below; adapt the device-label rules if your ROM uses
+different existing labels.
+
+```te
+type oplus_hardware_touch_service, domain;
+type oplus_hardware_touch_service_exec, exec_type, vendor_file_type, file_type;
+type oplus_hardware_touch_service_panel_service, service_manager_type, hal_service_type, protected_service;
+
+init_daemon_domain(oplus_hardware_touch_service)
+
+# /dev/xiaomi-touch and /proc/tp_gesture
+allow oplus_hardware_touch_service touchfeature_device:chr_file rw_file_perms;
+allow oplus_hardware_touch_service proc_touchpad:file rw_file_perms;
+
+# Touchscreen evdev and uinput wake/preview injection. AOSP labels
+# /dev/uinput as uhid_device; uinput_device is not a topaz policy type.
+allow oplus_hardware_touch_service input_device:chr_file rw_file_perms;
+allow oplus_hardware_touch_service uhid_device:chr_file rw_file_perms;
+
+# Xiaomi mi_display doze and DCS brightness interfaces.
+allow oplus_hardware_touch_service graphics_device:chr_file rw_file_perms;
+allow oplus_hardware_touch_service vendor_sysfs_graphics:dir r_dir_perms;
+allow oplus_hardware_touch_service vendor_sysfs_graphics:file rw_file_perms;
+allow oplus_hardware_touch_service vendor_sysfs_graphics:lnk_file r_file_perms;
+
+# Optional /sys/class/touch compatibility nodes.
+allow oplus_hardware_touch_service vendor_sysfs_touch:dir r_dir_perms;
+allow oplus_hardware_touch_service vendor_sysfs_touch:file rw_file_perms;
+allow oplus_hardware_touch_service vendor_sysfs_touch:lnk_file r_file_perms;
+
+# Raise-to-wake wake lock and logging.
+allow oplus_hardware_touch_service sysfs_wake_lock:file rw_file_perms;
+allow oplus_hardware_touch_service self:unix_stream_socket create_stream_socket_perms;
+allow oplus_hardware_touch_service logd:unix_stream_socket connectto;
+allow oplus_hardware_touch_service logd_socket:sock_file write;
+
+# Screen state, boot state and vendor properties.
+get_prop(oplus_hardware_touch_service, { debug_prop system_prop vendor_default_prop })
+
+# Binder service registration and discovery by SystemUI/system_server.
+allow oplus_hardware_touch_service servicemanager:binder call;
+allow oplus_hardware_touch_service oplus_hardware_touch_service_panel_service:service_manager { add find };
+allow platform_app oplus_hardware_touch_service_panel_service:service_manager find;
+allow system_app oplus_hardware_touch_service_panel_service:service_manager find;
+allow priv_app oplus_hardware_touch_service_panel_service:service_manager find;
+allow system_server oplus_hardware_touch_service_panel_service:service_manager find;
+allow platform_app oplus_hardware_touch_service:binder { call transfer };
+allow system_app oplus_hardware_touch_service:binder { call transfer };
+allow priv_app oplus_hardware_touch_service:binder { call transfer };
+allow system_server oplus_hardware_touch_service:binder { call transfer };
+allow oplus_hardware_touch_service platform_app:binder transfer;
+allow oplus_hardware_touch_service system_app:binder transfer;
+allow oplus_hardware_touch_service priv_app:binder transfer;
+allow oplus_hardware_touch_service system_server:binder transfer;
+allow platform_app oplus_hardware_touch_service:fd use;
+allow system_app oplus_hardware_touch_service:fd use;
+allow priv_app oplus_hardware_touch_service:fd use;
+allow system_server oplus_hardware_touch_service:fd use;
+
+# Android sensor-manager client for xiaomi.sensor.pickup.
+allow oplus_hardware_touch_service sensorservice_service:service_manager find;
+allow oplus_hardware_touch_service sensorservice_service:binder { call transfer };
+allow oplus_hardware_touch_service system_server:binder { call transfer };
+allow oplus_hardware_touch_service system_server:fd use;
+allow system_server oplus_hardware_touch_service:binder transfer;
+allow system_server oplus_hardware_touch_service:fd use;
+
+# /system/bin/cmd for power wakeup, settings defaults and input injection.
+allow oplus_hardware_touch_service system_file:file { execute execute_no_trans getattr map open read };
+allow oplus_hardware_touch_service settings_service:service_manager find;
+allow oplus_hardware_touch_service settings_service:binder { call transfer };
+allow oplus_hardware_touch_service input_service:service_manager find;
+allow oplus_hardware_touch_service input_service:binder { call transfer };
+allow oplus_hardware_touch_service power_service:service_manager find;
+allow oplus_hardware_touch_service power_service:binder { call transfer };
+allow oplus_hardware_touch_service activity_service:service_manager find;
+allow oplus_hardware_touch_service activity_service:binder { call transfer };
+```
+
+Add the vendor policy directory containing these files to
+`BOARD_VENDOR_SEPOLICY_DIRS` in the device tree, then rebuild the vendor image
+and SELinux policy. If your ROM does not use split vendor policy directories,
+append these rules to the equivalent existing vendor policy files instead.
+
+The policy intentionally reuses existing device labels:
+
+```text
+/dev/xiaomi-touch       -> touchfeature_device
+input event nodes       -> input_device
+/dev/uinput             -> uhid_device
+/proc/tp_gesture        -> proc_touchpad
+mi_display nodes        -> graphics_device / vendor_sysfs_graphics
+touch sysfs nodes       -> vendor_sysfs_touch
+```
+
+Do not relabel these shared devices globally. If a label is missing on another
+ROM, add a narrow rule for that existing type rather than changing the device
+node's label.
+
+### Permissions
+
+The HAL must run as `root` with groups `root system input` and the
+`SYS_RESOURCE` capability, as already declared in the included `.rc` file. It
+needs access to:
+
+```text
+/dev/xiaomi-touch
+/proc/tp_gesture
+/dev/input/touchscreen0 or the discovered touchscreen event node
+/dev/uinput
+/dev/mi_display/disp_feature
+/sys/devices/virtual/mi_display/.../doze_brightness
+/sys/devices/virtual/mi_display/.../mipi_rw
+/sys/class/backlight/panel0-backlight/brightness
+/sys/class/touch/* (optional compatibility nodes)
+/sys/power/wake_lock
+/system/bin/cmd
+```
+
+The service registers
+`vendor.oplus.hardware.displaypanelfeature.IDisplayPanelFeature/default` on
+Binder and uses `cmd power wakeup`, `cmd input keyevent`, and
+`cmd settings put` for gesture, AOD-preview, and AOD-default behavior.
+
+### Verify installation
+
+```bash
+getprop init.svc.oplus-touch-service
+ps -A | grep vendor.oplus.hardware.touch-V2-service
+logcat -s oplus-touch-service
+dmesg | grep -E 'avc:.*oplus_hardware_touch_service'
+```
+
+The service can be enabled or disabled after the `.rc` has been loaded:
+
+```bash
+setprop vendor.touch.hal.enable 1
+setprop vendor.touch.hal.enable 0
+```
 
 ## Configuration
 
@@ -162,40 +378,6 @@ fds. It starts on `late-fs` and can be controlled with:
 setprop vendor.touch.hal.enable 1
 setprop vendor.touch.hal.enable 0
 ```
-
-The service must be able to open the touch misc device, touchscreen evdev,
-`/dev/uinput`, `/proc/tp_gesture`, and the `mi_display` nodes. Keep the existing
-device labels for those nodes; do not relabel shared devices.
-
-## SELinux integration
-
-The repository keeps policy sources under `sepolicy/`. They are intentionally
-kept separate from the install-only vendor ZIP:
-
-```text
-oplus-hardware-touch-service.te
-oplus-hardware-touch-service-file_contexts
-oplus-hardware-touch-service-service_contexts
-```
-
-Merge all three into the device vendor policy. The service context is required
-so SystemUI and system_server can find
-`vendor.oplus.hardware.displaypanelfeature.IDisplayPanelFeature/default`.
-The file context labels only the daemon executable.
-
-Relevant existing topaz labels used by the policy:
-
-```text
-/dev/xiaomi-touch       -> touchfeature_device
-input event nodes       -> input_device
-/dev/uinput             -> uhid_device (AOSP label)
-/proc/tp_gesture        -> proc_touchpad
-mi_display sysfs        -> vendor_sysfs_graphics
-touch sysfs             -> vendor_sysfs_touch
-```
-
-`uinput_device` is not a real topaz policy type; the policy uses
-`uhid_device`, which is the AOSP label for `/dev/uinput`.
 
 ## Touch interfaces
 
