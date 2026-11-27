@@ -2,9 +2,7 @@
 
 use log::{error, info};
 use std::path::Path;
-use std::sync::Arc;
 use tokio::fs;
-use tokio::sync::Mutex;
 
 use crate::config::SysfsConfig;
 use crate::error::{TouchError, TouchResult};
@@ -12,50 +10,38 @@ use crate::error::{TouchError, TouchResult};
 /// Sysfs manager for touch-related sysfs entries
 pub struct SysfsManager {
     config: SysfsConfig,
-    cache: Arc<Mutex<std::collections::HashMap<String, String>>>,
 }
 
 impl SysfsManager {
     pub fn new(config: SysfsConfig) -> Self {
-        Self {
-            config,
-            cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
-        }
+        Self { config }
     }
 
     /// Write a boolean value to sysfs
     pub async fn write_bool(&self, name: &str, value: bool) -> TouchResult<()> {
         let path = self.get_path(name)?;
         let content = if value { "1" } else { "0" };
-        self.write_file(&path, content).await?;
-        self.update_cache(name, content).await;
-        Ok(())
+        self.write_file(&path, content).await
     }
 
     /// Write a u8 value to sysfs
     pub async fn write_u8(&self, name: &str, value: u8) -> TouchResult<()> {
         let path = self.get_path(name)?;
         let content = value.to_string();
-        self.write_file(&path, &content).await?;
-        self.update_cache(name, &content).await;
-        Ok(())
+        self.write_file(&path, &content).await
     }
 
     /// Write a u32 value to sysfs
     pub async fn write_u32(&self, name: &str, value: u32) -> TouchResult<()> {
         let path = self.get_path(name)?;
         let content = value.to_string();
-        self.write_file(&path, &content).await?;
-        self.update_cache(name, &content).await;
-        Ok(())
+        self.write_file(&path, &content).await
     }
 
     /// Write a string value to sysfs
     pub async fn write_string(&self, name: &str, value: &str) -> TouchResult<()> {
         let path = self.get_path(name)?;
-        self.write_file(&path, value).await?;
-        self.update_cache(name, value).await;
-        Ok(())
+        self.write_file(&path, value).await
     }
 
     /// Read a boolean value from sysfs
@@ -148,18 +134,6 @@ impl SysfsManager {
             error!("Failed to read {}: {}", path.display(), e);
             TouchError::Io(e)
         })
-    }
-
-    /// Update cache
-    async fn update_cache(&self, name: &str, value: &str) {
-        let mut cache = self.cache.lock().await;
-        cache.insert(name.to_string(), value.to_string());
-    }
-
-    /// Get cached value
-    pub async fn get_cached(&self, name: &str) -> Option<String> {
-        let cache = self.cache.lock().await;
-        cache.get(name).cloned()
     }
 
     /// Check if sysfs entry exists

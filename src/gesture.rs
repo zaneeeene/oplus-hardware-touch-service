@@ -508,10 +508,14 @@ impl GestureHandler {
     }
 
     async fn emit_gesture(&self, gesture_type: GestureType, x: i32, y: i32) -> TouchResult<()> {
-        let (enabled, action, wake_screen) = self.entry_for(gesture_type);
-        if !enabled {
+        let Some(entry) = self.entry_for(gesture_type) else {
+            return Ok(());
+        };
+        if !entry.enabled {
             return Ok(());
         }
+        let action = entry.action.clone();
+        let wake_screen = entry.wake_screen;
 
         if gesture_type == GestureType::SingleTap && action == "aod_preview" && !wake_screen {
             if !screen_is_off_or_doze(ScreenState::read()) {
@@ -541,7 +545,10 @@ impl GestureHandler {
         // accepted by the kernel yet never be routed through OPlus SystemUI's
         // screen-off gesture dispatcher, which made preview look successful in
         // logs while doing nothing on screen.
-        hold_wake_lock("oplus_hardware_touch_service_preview 1500000000");
+        wake::hold_wake_lock(
+            "oplus_hardware_touch_service_preview",
+            Duration::from_millis(1500),
+        );
         let command_result = tokio::task::spawn_blocking(|| {
             aod_preview_command()
                 .stdin(Stdio::null())
@@ -635,7 +642,7 @@ impl GestureHandler {
         }
     }
 
-    fn entry_for(&self, gesture_type: GestureType) -> (bool, String, bool) {
+    fn entry_for(&self, gesture_type: GestureType) -> Option<&GestureEntry> {
         let entry: &GestureEntry = match gesture_type {
             GestureType::DoubleTap => &self.config.double_tap,
             GestureType::SingleTap => &self.config.single_tap,
@@ -644,19 +651,14 @@ impl GestureHandler {
             GestureType::SwipeLeft => &self.config.swipe_left,
             GestureType::SwipeRight => &self.config.swipe_right,
             GestureType::Custom(id) => {
-                if let Some(entry) = self
+                return self
                     .config
                     .custom
                     .iter()
-                    .find(|entry| entry.gesture_id == id)
-                {
-                    entry
-                } else {
-                    return (false, "none".to_string(), false);
-                }
+                    .find(|entry| entry.gesture_id == id);
             }
         };
-        (entry.enabled, entry.action.clone(), entry.wake_screen)
+        Some(entry)
     }
 
     pub async fn handle_kernel_gesture(&self, gesture_id: u8) -> TouchResult<()> {
@@ -670,7 +672,7 @@ pub struct AodGestureHandler {
 }
 
 impl AodGestureHandler {
-    pub fn new(_gesture_handler: Arc<GestureHandler>) -> Self {
+    pub fn new() -> Self {
         Self {
             expanded: Arc::new(Mutex::new(false)),
         }
@@ -694,6 +696,12 @@ impl AodGestureHandler {
 
     pub async fn collapse(&self) {
         *self.expanded.lock().await = false;
+    }
+}
+
+impl Default for AodGestureHandler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -746,12 +754,6 @@ fn aod_preview_command() -> Command {
         command.args(["input", "keyevent", "134"]);
         command
     }
-}
-
-fn hold_wake_lock(request: &str) {
-    // A timed wake lock keeps the AP out of suspend until InputManager has
-    // consumed the key. It does not light the panel.
-    let _ = std::fs::write("/sys/power/wake_lock", request);
 }
 
 #[cfg(test)]

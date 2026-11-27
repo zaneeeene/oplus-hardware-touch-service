@@ -356,12 +356,8 @@ logcat -s oplus-touch-service
 dmesg | grep -E 'avc:.*oplus_hardware_touch_service'
 ```
 
-The service can be enabled or disabled after the `.rc` has been loaded:
-
-```bash
-setprop vendor.touch.hal.enable 1
-setprop vendor.touch.hal.enable 0
-```
+The service is controlled with the property documented under
+[Configuration](#configuration).
 
 ## Configuration
 
@@ -434,8 +430,8 @@ proc node.
 
 The previous live Settings/XML selector was removed because ports expose
 different or missing gesture keys, and an unmatched key silently forced DT2W
-off even when the gesture itself was enabled. Older vendor configs containing
-a `dt2w_settings` object remain loadable; that object is ignored.
+off even when the gesture itself was enabled. The current HAL does not read
+any Settings/XML DT2W key.
 
 ## AOD behavior
 

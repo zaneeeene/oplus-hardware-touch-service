@@ -55,22 +55,3 @@ pub fn find_touchscreen() -> Option<PathBuf> {
         "ili9",
     ])
 }
-
-pub fn find_accelerometer() -> Option<PathBuf> {
-    discover_input_device(&[
-        "accelerometer",
-        "accel_3d",
-        "accelerometer_3d",
-        "gsensor",
-        "g-sensor",
-        "kxtj",
-        "bmi1",
-        "bmi2",
-        "bma2",
-        "lis2",
-        "lsm6",
-        "icm4",
-        "mpu6",
-        "sc7a",
-    ])
-}

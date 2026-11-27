@@ -24,17 +24,14 @@ pub enum AodState {
 }
 
 #[derive(Debug, Clone)]
-pub struct AodConfig {
-    pub enabled: bool,
-    pub brightness: u8,
-    pub full_screen: bool,
-    pub seamless: bool,
-    pub default_on: bool,
-    pub music_control: bool,
-    pub notification_preview: bool,
-    pub fingerprint_area: bool,
-    pub keepalive: AodKeepaliveConfig,
-    pub defaults: AodDefaultsConfig,
+struct AodConfig {
+    enabled: bool,
+    brightness: u8,
+    full_screen: bool,
+    seamless: bool,
+    music_control: bool,
+    keepalive: AodKeepaliveConfig,
+    defaults: AodDefaultsConfig,
 }
 
 #[derive(Clone)]
@@ -62,10 +59,7 @@ impl AodManager {
             brightness: config.aod_brightness,
             full_screen: config.enable_full_screen_aod,
             seamless: config.enable_seamless_aod,
-            default_on: true,
             music_control: true,
-            notification_preview: true,
-            fingerprint_area: true,
             keepalive: config.aod_keepalive.clone(),
             defaults: config.aod_defaults.clone(),
         };
@@ -303,15 +297,4 @@ impl AodManager {
         }
         Ok(())
     }
-}
-
-pub mod aod_sysfs {
-    pub const AOD_ENABLE: &str = "aod_enable";
-    pub const AOD_BRIGHTNESS: &str = "aod_brightness";
-    pub const AOD_FULL_SCREEN: &str = "aod_full_screen";
-    pub const AOD_SEAMLESS: &str = "aod_seamless";
-    pub const AOD_EXPAND_MUSIC: &str = "aod_expand_music";
-    pub const AOD_WAKE_SCREEN: &str = "wake_screen";
-    pub const AOD_NOTIFICATION_PREVIEW: &str = "aod_notification_preview";
-    pub const AOD_FINGERPRINT_AREA: &str = "aod_fingerprint_area";
 }

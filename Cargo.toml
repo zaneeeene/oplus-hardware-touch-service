@@ -4,12 +4,7 @@ version = "1.0.0"
 edition = "2021"
 description = "OPlus hardware touch service for Redmi Note 12 4G (topaz/SM6225) - AOD, DT2W, Gestures"
 license = "GPL-2.0-only"
-repository = "https://github.com/your-repo/oplus-hardware-touch-service"
-
-[package.metadata.android]
-bp_name = "oplus-hardware-touch-service"
-src_libs = ["liboplus_hardware_touch_service"]
-apex_available = ["com.android.art"]
+repository = "https://github.com/zaneeeene/oplus-hardware-touch-service"
 
 [lib]
 name = "oplus_hardware_touch_service"
@@ -26,14 +21,10 @@ env_logger = "0.10"
 thiserror = "1.0"
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "sync", "fs", "time", "signal"] }
 nix = { version = "0.27", features = ["fs", "poll", "event", "ioctl"] }
-anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
-
-[build-dependencies]
-chrono = "0.4"
 
 [profile.release]
 lto = true

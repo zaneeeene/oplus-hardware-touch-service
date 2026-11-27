@@ -140,7 +140,7 @@ impl TouchHal {
         aod.start().await?;
 
         if let Some(gesture) = self.gesture_handler.lock().await.clone() {
-            let aod_gesture = AodGestureHandler::new(Arc::new(gesture.clone()));
+            let aod_gesture = AodGestureHandler::new();
             *self.aod_gesture_handler.lock().await = Some(aod_gesture.clone());
 
             let mut events = gesture.subscribe();

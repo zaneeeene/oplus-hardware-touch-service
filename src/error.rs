@@ -49,9 +49,3 @@ pub enum TouchError {
 }
 
 pub type TouchResult<T> = Result<T, TouchError>;
-
-impl From<anyhow::Error> for TouchError {
-    fn from(err: anyhow::Error) -> Self {
-        TouchError::Internal(err.to_string())
-    }
-}

@@ -23,9 +23,7 @@ pub use aod::{AodManager, AodState};
 pub use config::TouchConfig;
 pub use doze::{start as start_doze_keeper, DozeKeeperHandle};
 pub use error::{TouchError, TouchResult};
-pub use evdev::{
-    configured_or_discover, discover_input_device, find_accelerometer, find_touchscreen,
-};
+pub use evdev::{configured_or_discover, discover_input_device, find_touchscreen};
 pub use gesture::{AodGestureHandler, GestureEvent, GestureHandler, GestureType};
 pub use hal::TouchHal;
 pub use panel_feature::start as start_panel_feature_service;

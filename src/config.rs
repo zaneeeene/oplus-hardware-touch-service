@@ -16,9 +16,6 @@ pub struct TouchConfig {
     /// Path to touchscreen device for gestures
     pub touchscreen_path: PathBuf,
 
-    /// Path to proximity sensor
-    pub proximity_path: Option<PathBuf>,
-
     /// Enable AOD (Always On Display)
     pub enable_aod: bool,
 
@@ -55,17 +52,11 @@ pub struct TouchConfig {
     /// AOD brightness level (0-255)
     pub aod_brightness: u8,
 
-    /// DT2W gesture ID
-    pub dt2w_gesture_id: u8,
-
     /// Gesture configurations
     pub gestures: GestureConfig,
 
     /// Raise to wake config
     pub raise_to_wake: RaiseToWakeConfig,
-
-    /// Poll interval for gesture detection (ms)
-    pub poll_interval_ms: u64,
 
     /// Sysfs paths for touch features
     pub sysfs: SysfsConfig,
@@ -106,14 +97,6 @@ pub struct GestureEntry {
 #[derive(Debug, Clone)]
 pub struct RaiseToWakeConfig {
     pub enabled: bool,
-
-    /// Retained for existing configs. Sensor HAL mode is the default now.
-    pub sensitivity: u8,
-
-    pub timeout_ms: u32,
-
-    /// Legacy direct-evdev path. The Android sensor HAL is used by default.
-    pub accelerometer_path: PathBuf,
 
     /// Android sensor string type used by the Xiaomi sensor hub.
     pub sensor_type: String,
@@ -288,7 +271,6 @@ impl Default for TouchConfig {
             xiaomi_touch_path: PathBuf::from("/dev/xiaomi-touch"),
             tp_gesture_path: PathBuf::from("/proc/tp_gesture"),
             touchscreen_path: PathBuf::from("/dev/input/touchscreen0"),
-            proximity_path: Some(PathBuf::from("/dev/input/proximity")),
             enable_aod: true,
             enable_dt2w: true,
             enable_gestures: true,
@@ -300,10 +282,8 @@ impl Default for TouchConfig {
             aod_defaults: AodDefaultsConfig::default(),
             aod_panel_service: AodPanelServiceConfig::default(),
             aod_brightness: 50,
-            dt2w_gesture_id: 0x22,
             gestures: GestureConfig::default(),
             raise_to_wake: RaiseToWakeConfig::default(),
-            poll_interval_ms: 50,
             sysfs: SysfsConfig::default(),
         }
     }
@@ -357,9 +337,6 @@ impl Default for RaiseToWakeConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            sensitivity: 128,
-            timeout_ms: 5000,
-            accelerometer_path: PathBuf::from("/dev/input/accelerometer"),
             sensor_type: default_pickup_sensor_type(),
             sensor_package: default_raise_package(),
             prefer_wakeup_sensor: false,
@@ -448,7 +425,10 @@ mod tests {
         assert!(config.aod_defaults.enabled);
         assert!(config.aod_panel_service.enabled);
         assert!(config.gestures.double_tap.enabled);
-        assert_eq!(config.dt2w_gesture_id, gesture_ids::DOUBLE_TAP);
+        assert_eq!(
+            config.gestures.double_tap.gesture_id,
+            gesture_ids::DOUBLE_TAP
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::ffi::{CStr, CString};
 use std::fmt::Write as _;
 use std::process::{Command, Stdio};
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -163,7 +163,6 @@ pub struct RaiseToWakeManager {
     sysfs: Arc<SysfsManager>,
     event_tx: broadcast::Sender<RaiseToWakeEvent>,
     running: Arc<AtomicBool>,
-    sensitivity: Arc<AtomicU8>,
     thread: Arc<StdMutex<Option<JoinHandle<()>>>>,
 }
 
@@ -171,7 +170,6 @@ impl RaiseToWakeManager {
     pub fn new(config: RaiseToWakeConfig, sysfs: Arc<SysfsManager>) -> TouchResult<Self> {
         let (event_tx, _) = broadcast::channel(50);
         Ok(Self {
-            sensitivity: Arc::new(AtomicU8::new(config.sensitivity)),
             config,
             sysfs,
             event_tx,
@@ -225,13 +223,6 @@ impl RaiseToWakeManager {
         }
         info!("Raise to wake stopped");
         Ok(())
-    }
-
-    pub async fn set_sensitivity(&self, sensitivity: u8) {
-        self.sensitivity.store(sensitivity, Ordering::Release);
-        info!(
-            "Raise-to-wake sensitivity set to {sensitivity}; sensor HAL mode uses the pickup event"
-        );
     }
 
     pub async fn is_running(&self) -> bool {
