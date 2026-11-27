@@ -1,10 +1,18 @@
 # OPlus Hardware Touch Service for topaz
 
-`oplus-hardware-touch-service` is a Rust userspace daemon for the Redmi Note
-12 4G (`topaz`, SM6225). It replaces the broken userspace `xiaomi-touch`
-helper with one Android/bionic executable and keeps all runtime behavior in
-the daemon and init service. No companion shell script or user-installed
-helper is required.
+`oplus-hardware-touch-service` is a userspace HAL for the Redmi Note 12 4G
+(`topaz`, SM6225). It replaces the broken userspace `xiaomi-touch` helper with
+one Android/bionic executable and keeps all runtime behavior in the daemon and
+init service. No companion shell script or user-installed helper is required.
+
+The repository contains two independent implementations:
+
+- the original Rust implementation in `src/`;
+- a standalone C++20 translation in `cpp/` with no Rust FFI or wrapper.
+
+Both implement the same touch, gesture, AOD, display-panel, and
+raise-to-wake behavior. They are built separately, produce the same installed
+executable name, and must not be installed at the same time.
 
 The installed HAL executable uses the required name
 `vendor.oplus.hardware.touch-V2-service`. Its init service is
@@ -90,6 +98,22 @@ The target is an AArch64 build. The host may be AArch64 Linux; the supplied
 `tools/android-linker.sh` uses Rust's native `rust-lld` because the NDK's
 x86_64 clang driver cannot execute on that host.
 
+The standalone C++ port builds into separate directories and does not replace
+or remove any Rust artifact:
+
+```text
+build/cpp/out/vendor.oplus.hardware.touch-V2-service
+build/cpp/out/oplus-hardware-touch-service-cpp-vendor.zip
+build/cpp/out/oplus-hardware-touch-service-cpp-SHA256SUMS
+
+build/cpp/out/backlight-gesture/vendor.oplus.hardware.touch-V2-service
+build/cpp/out/backlight-gesture/oplus-hardware-touch-service-cpp-backlight-gesture-vendor.zip
+build/cpp/out/backlight-gesture/oplus-hardware-touch-service-cpp-backlight-gesture-SHA256SUMS
+```
+
+The C++ source, architecture, and build details are documented in
+[`cpp/README.md`](cpp/README.md).
+
 ## Build
 
 ```bash
@@ -122,6 +146,31 @@ files stay under `build/` and `target/`.
 GitHub Actions runs the host checks and the full Android build. Both AArch64
 Linux hosts and conventional x86_64 GitHub runners are supported.
 
+### C++ build
+
+```bash
+cd oplus-hardware-touch-service
+export ANDROID_NDK_HOME=/path/to/android-ndk-r26d
+./cpp-build.sh --variant both
+```
+
+Build only one backend when required:
+
+```bash
+./cpp-build.sh --variant stable
+./cpp-build.sh --variant backlight
+```
+
+`cpp-build.sh` locates the NDK and a host-executable Clang automatically, or
+accepts `ANDROID_NDK_HOME`, `ANDROID_NDK_ROOT`, `CPP_CLANG`, and
+`CPP_CLANGXX`. It supports an AArch64 Linux host as well as a conventional
+x86_64 host. The script runs the host logic tests and executable self-test,
+cross-builds both requested variants, verifies the Android ELF properties,
+packages the three-file vendor ZIP, and writes SHA-256 checksums.
+
+The C++ stable and backlight backends intentionally use separate output
+directories. Selecting `both` does not overwrite the stable binary or ZIP.
+
 ## Repository layout
 
 ```text
@@ -129,8 +178,10 @@ etc/init/               Android init service
 kernel/                 Optional kernel-interface reference stubs
 sepolicy/               SELinux policy and file/service contexts
 src/                    Rust daemon, compiled-in defaults, and HAL implementation
+cpp/                    Standalone C++20 HAL translation and host tests
 tools/                  Linker and on-device diagnostic tools
 build.sh                Format, test, cross-build, package, and checksum
+cpp-build.sh            C++ host-test, cross-build, verify, and package script
 ```
 
 Compiled binaries, ZIP archives, `target/`, `build/`, and the generated
@@ -145,6 +196,10 @@ README.md
 vendor/bin/vendor.oplus.hardware.touch-V2-service
 vendor/etc/init/vendor.oplus.hardware.touch-V2-service.rc
 ```
+
+Install the Rust ZIP or one C++ ZIP, never both. Every build uses the same
+installed binary and init-service names, so merging two payloads would replace
+one implementation with the other.
 
 Merge the ZIP's `vendor/` directory into the vendor image. The final device
 paths must be:
@@ -361,11 +416,13 @@ The service is controlled with the property documented under
 
 ## Configuration
 
-There is no runtime `config.json`. All defaults are defined in
-`src/config.rs` and compiled directly into the HAL executable, so the service
-does not create or read anything under `/vendor/etc/oplus-hardware-touch-service`
-and works with a read-only vendor image. Change a value in `TouchConfig`'s
-`Default` implementation and rebuild to produce a different profile.
+There is no runtime `config.json`. Rust defaults are defined in
+`src/config.rs`; C++ defaults are defined in
+`cpp/include/oplus_touch/config.hpp`. Both are compiled directly into the HAL
+executable, so the service does not create or read anything under
+`/vendor/etc/oplus-hardware-touch-service` and works with a read-only vendor
+image. Change the relevant defaults and rebuild to produce a different
+profile.
 
 The init service is deliberately long-lived because it owns evdev and uinput
 fds. It starts on `late-fs` and can be controlled with:
@@ -545,11 +602,12 @@ continuous lock. The HAL also falls back from the exact
 
 ## API 35+
 
-The binary targets API 30 and uses only stable NDK ABI symbols, so it is
-expected to run on API 35+ vendor images. API 35 compatibility is not a
+Both binaries target API 30 and use only stable NDK/libc ABI symbols, so they
+are expected to run on API 35+ vendor images. API 35 compatibility is not a
 guarantee until verified on the target device with its actual SELinux policy,
-service-manager behavior, panel driver, and OPlus SystemUI. The ZIP is built
-with 64 KiB ELF load alignment to remain compatible with newer page sizes.
+service-manager behavior, panel driver, and OPlus SystemUI. Both ZIPs are
+built with 64 KiB ELF load alignment to remain compatible with newer page
+sizes.
 
 ## On-device verification
 
@@ -566,10 +624,12 @@ For a host-side self-test:
 
 ```bash
 cargo run -- --test
+./build/cpp/host/bin/vendor.oplus.hardware.touch-V2-service --test
 ```
 
-The self-test now checks boolean `/proc/tp_gesture` arming and does not claim
-that the node accepts a gesture bitmap.
+The Rust self-test and the C++ self-test both check boolean
+`/proc/tp_gesture` arming and do not claim that the node accepts a gesture
+bitmap.
 
 Hardware verdicts still require the target device. In particular, verify:
 
